@@ -208,6 +208,8 @@ const ccBillsNextPayment = nextBills.filter(b =>
 // These are displayed in the CC Recurring Subscriptions section (aligned with the spending budget).
 const estimatedCCRecurring = ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
 const actualCCRecurring    = ccBillsNextPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
+const allCCRecurringChecked = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
+const ccDisplayMode: 'estimated' | 'actual' = allCCRecurringChecked ? 'actual' : 'estimated';
 const ccRecurringInVariable = ccDisplayMode === 'actual' ? actualCCRecurring : estimatedCCRecurring;
 const ccVariableOnly = Math.max(0, ccVariable - ccRecurringInVariable); // strip correct cycle's recurring
 const ccUsed         = ccVariableOnly + ccBig;
@@ -231,10 +233,6 @@ const allCCPaymentChecked = ccBillsForPayment.length > 0 && ccBillsForPayment.ev
 const ccRecurringMode: 'estimated' | 'actual' = allCCPaymentChecked ? 'actual' : 'estimated';
 const ccRecurringBudget = ccRecurringMode === 'actual' ? actualCCPaymentRecurring : estimatedCCPaymentRecurring;
 const ccPaymentAmount = Number(summary.cc_budget) + ccRecurringBudget;
-// Toggle in the CC Recurring section defaults based on whether displayed (this billing cycle) subs are all checked.
-const allCCRecurringChecked = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
-const ccDisplayMode: 'estimated' | 'actual' = allCCRecurringChecked ? 'actual' : 'estimated';
-
 // NET = Income + Other Cash Income - Fixed Checking Bills - CC Payment - Other Cash Expenses
 const netAmount = incomeTotal + otherCashIncomeTotal - totalFixedChecking - ccPaymentAmount - otherCashExpenseTotal;
 
