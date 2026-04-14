@@ -102,7 +102,8 @@ export function calcCheckingExpenses(bills: BillRow[]): number {
 }
 
 export function totalIncome(s: MonthlySummary): number {
-  return s.income_alex + s.income_maham + s.income_other;
+  // income_other is legacy (Kirby rent) — now tracked via cash_expenses income rows.
+  return s.income_alex + s.income_maham;
 }
 
 // ── Formatting ────────────────────────────────────────────────────────────────
