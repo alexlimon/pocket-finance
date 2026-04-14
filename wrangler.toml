@@ -1,0 +1,11 @@
+name = "pocket-finance"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = "dist"
+
+# Secrets set via Cloudflare dashboard (or .dev.vars for local):
+# TURSO_DATABASE_URL
+# TURSO_AUTH_TOKEN
+# PLAID_CLIENT_ID
+# PLAID_SECRET
+# PLAID_ENV  (sandbox | production)

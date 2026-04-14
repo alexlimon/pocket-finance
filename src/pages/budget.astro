@@ -1,0 +1,1189 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import {
+  fmt, monthLabel, prevMonth, nextMonth, currentMonth, totalIncome,
+  ccSubIsInPaymentMonth, ccSubPaymentMonth,
+  type MonthlySummary, type BillRow, type CCCharge, type CashExpense,
+} from '../lib/budget';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+
+const month   = Astro.url.searchParams.get('month') ?? currentMonth();
+const today   = new Date();
+const isNow   = month === currentMonth();
+const todayDay = today.getDate();
+
+const client = getClient(env);
+
+let summary: MonthlySummary = {
+  month, income_alex:0, income_maham:0, income_other:0,
+  checking_before:0, checking_after:0, savings_before:0, savings_after:0,
+  cc_budget:5000, notes:null,
+};
+let bills: (BillRow & { effective_paid: boolean; is_auto: boolean })[] = [];
+let ccCharges: (CCCharge & { payment_month: string|null })[] = [];
+let cashExpenses: CashExpense[] = [];
+let ccSettings: { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
+let variableSpendRows: { card: string; amount: number }[] = [];
+let nextMonthCCBudget: number | null = null;
+let nextBills: (BillRow & { effective_paid: boolean; is_auto: boolean })[] = [];
+
+try {
+  const prev = prevMonth(month);
+  const next = nextMonth(month);
+  // Fetch previous month (balance propagation) and next month (CC spending budget)
+  const [sumRes, billRes, ccRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes] = await Promise.all([
+    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
+    client.execute({
+      sql: `SELECT bc.*,
+                   bp.id as payment_id,
+                   bp.amount as paid_amount,
+                   COALESCE(bp.is_paid, -1) as explicit_paid,
+                   COALESCE(bp.is_cc, bc.is_cc_default) as is_cc,
+                   COALESCE(bp.is_skipped, 0) as is_skipped
+            FROM budget_config bc
+            LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?
+            WHERE bc.is_recurring = 1
+            ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`,
+      args: [month],
+    }),
+    // Big purchases only (variable spend is now in cc_variable_spend)
+    client.execute({
+      sql: `SELECT cc.*, cs.billing_end_day, cs.payment_day
+            FROM cc_charges cc
+            LEFT JOIN cc_settings cs ON cc.card = cs.card
+            WHERE cc.month = ? AND cc.is_big_purchase = 1
+            ORDER BY cc.date ASC NULLS LAST, cc.amount DESC`,
+      args: [month],
+    }),
+    client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month = ? ORDER BY date ASC', args: [month] }),
+    client.execute("SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card"),
+    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [prev] }),
+    // Per-card variable spend for this month
+    client.execute({ sql: `SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card`, args: [month] }),
+    // Next month summary (for CC spending budget = next month's cc_budget)
+    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] }),
+    // Next month's bills+payments — used for the "billed this month, paid next month" display
+    // (CC Recurring Subscriptions section reflects next month's payment cycle).
+    client.execute({
+      sql: `SELECT bc.*,
+                   bp.id as payment_id,
+                   bp.amount as paid_amount,
+                   COALESCE(bp.is_paid, -1) as explicit_paid,
+                   COALESCE(bp.is_cc, bc.is_cc_default) as is_cc,
+                   COALESCE(bp.is_skipped, 0) as is_skipped
+            FROM budget_config bc
+            LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?
+            WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1
+            ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`,
+      args: [next],
+    }),
+  ]);
+
+  if (sumRes.rows.length) {
+    summary = sumRes.rows[0] as unknown as MonthlySummary;
+  } else if (prevSumRes.rows.length) {
+    // No record for this month yet — propagate balances forward from previous month
+    const prev = prevSumRes.rows[0] as unknown as MonthlySummary;
+    summary = {
+      ...summary,
+      checking_before: Number(prev.checking_after),
+      checking_after:  Number(prev.checking_after), // same until user updates
+      savings_before:  Number(prev.savings_after),
+      savings_after:   Number(prev.savings_after),
+      // Carry forward income as last known estimate
+      income_alex:  Number(prev.income_alex),
+      income_maham: Number(prev.income_maham),
+      income_other: Number(prev.income_other),
+    };
+  }
+
+  // Next month's cc_budget = this month's CC spending budget
+  if (nextSumRes.rows.length) {
+    const ns = nextSumRes.rows[0] as unknown as MonthlySummary;
+    nextMonthCCBudget = Number(ns.cc_budget) || null;
+  }
+
+  ccSettings = settingsRes.rows as unknown as typeof ccSettings;
+
+  bills = (billRes.rows as unknown[]).map((r: any) => {
+    const hasExplicit   = Number(r.explicit_paid) !== -1;
+    const explicitPaid  = hasExplicit ? !!Number(r.explicit_paid) : false;
+    const isAuto = isNow && !hasExplicit && r.due_day !== null && todayDay >= Number(r.due_day);
+    const effectivePaid = hasExplicit ? explicitPaid : isAuto;
+    return {
+      ...r,
+      actual_amount:  effectivePaid ? Number(r.paid_amount ?? r.monthly_target ?? 0)
+                                    : Number(r.monthly_target ?? 0),
+      is_paid:        effectivePaid ? 1 : 0,
+      is_cc:          Number(r.is_cc),
+      effective_paid: effectivePaid,
+      is_auto:        isAuto,
+      is_skipped:     Number(r.is_skipped) === 1,
+    };
+  }) as typeof bills;
+
+  ccCharges        = ccRes.rows   as unknown as typeof ccCharges;   // big purchases only
+  cashExpenses     = cashRes.rows as unknown as CashExpense[];
+  variableSpendRows= varRes.rows  as unknown as typeof variableSpendRows;
+
+  // Map next-month bills (CC recurring only) with their own payment state
+  nextBills = (nextBillRes.rows as unknown[]).map((r: any) => {
+    const hasExplicit   = Number(r.explicit_paid) !== -1;
+    const explicitPaid  = hasExplicit ? !!Number(r.explicit_paid) : false;
+    const effectivePaid = hasExplicit ? explicitPaid : false; // no auto-check for future months
+    return {
+      ...r,
+      actual_amount:  effectivePaid ? Number(r.paid_amount ?? r.monthly_target ?? 0)
+                                    : Number(r.monthly_target ?? 0),
+      is_paid:        effectivePaid ? 1 : 0,
+      is_cc:          Number(r.is_cc),
+      effective_paid: effectivePaid,
+      is_auto:        false,
+      is_skipped:     Number(r.is_skipped) === 1,
+    };
+  }) as typeof nextBills;
+} finally { client.close(); }
+
+// Build a map card→amount for variable spend
+const variableSpendMap = new Map(variableSpendRows.map(r => [r.card, Number(r.amount)]));
+
+// ── Derived groupings ────────────────────────────────────────────────────────
+// Filter out the CC payment bill from checking bills (we compute it from prior month budget)
+const ccPaymentPattern = /cc\s*payment|credit\s*card\s*payment/i;
+const checkingBills = bills.filter(b => !b.is_cc_default && !ccPaymentPattern.test(b.name) && !b.is_skipped);
+const ccBills       = bills.filter(b => !!b.is_cc_default && !b.is_skipped);
+const bigPurchases  = ccCharges; // all cc_charges are now big purchases only
+
+// Big purchases grouped by payment_month
+const bigByPayMonth = new Map<string, typeof ccCharges>();
+for (const c of bigPurchases) {
+  const key = c.payment_month ?? 'unknown';
+  if (!bigByPayMonth.has(key)) bigByPayMonth.set(key, []);
+  bigByPayMonth.get(key)!.push(c);
+}
+const bigPayGroups = [...bigByPayMonth.entries()].sort(([a],[b]) => {
+  if (a==='unknown') return 1; if (b==='unknown') return -1; return a.localeCompare(b);
+});
+
+const settingsMap = new Map(ccSettings.map(s => [s.card, s]));
+
+// Billing end day for the default CC (Sapphire). Drives the cycle filter below.
+const defaultBillingEndDay = settingsMap.get('sapphire')?.billing_end_day ?? 25;
+
+// ── Filter to only the CC recurring subs that belong to THIS month's CC payment ──
+// For payment month M, a sub is in scope when:
+//   due_day <= billingEndDay  →  billed in prevMonth(M), paid in M
+//   due_day >  billingEndDay  →  billed in prevPrevMonth(M), paid in M
+// Subs without a due_day are always included (manual control).
+// This is the single source of truth — all calculations below use this array.
+const ccBillsForPayment = ccBills.filter(b =>
+  ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, defaultBillingEndDay, month)
+);
+
+// CC recurring for the CURRENT PAYMENT (last billing cycle, paid this month) — used for ccPaymentAmount only
+const estimatedCCPaymentRecurring = ccBillsForPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
+const actualCCPaymentRecurring    = ccBillsForPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
+
+// CC spending budget for this month = next month's cc_budget
+// (spreadsheet payment-month convention: cc_budget[M] = what you pay in M = prior month's variable spend)
+const ccSpendBudget = nextMonthCCBudget ?? Number(summary.cc_budget);
+
+// CC remaining = spending budget - variable spend (non-recurring) - big purchases
+// cc_variable_spend includes recurring charges billed THIS month (paid NEXT month).
+// Strip out NEXT month's estimated recurring (same billing cycle as the variable spend),
+// NOT the current payment's recurring which belongs to a different cycle.
+const ccVariable     = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
+const ccBig          = bigPurchases.reduce((s, c) => s + c.amount, 0);
+// Pull the display set from NEXT month's bill_payments rows — these subs are billed
+// in the current cycle and will be paid next month, so their paid-state/actuals live there.
+const ccBillsNextPayment = nextBills.filter(b =>
+  !b.is_skipped &&
+  ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, defaultBillingEndDay, nextMonth(month))
+);
+// CC recurring for THIS MONTH'S BILLING CYCLE — what's being charged now, paid next month.
+// These are displayed in the CC Recurring Subscriptions section (aligned with the spending budget).
+const estimatedCCRecurring = ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
+const actualCCRecurring    = ccBillsNextPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
+const ccRecurringInVariable = ccDisplayMode === 'actual' ? actualCCRecurring : estimatedCCRecurring;
+const ccVariableOnly = Math.max(0, ccVariable - ccRecurringInVariable); // strip correct cycle's recurring
+const ccUsed         = ccVariableOnly + ccBig;
+const ccRemaining    = ccSpendBudget - ccUsed;
+const ccUsedPct      = Math.min((ccUsed / ccSpendBudget) * 100, 100);
+const incomeTotal = totalIncome(summary);
+const otherCashExpenses = cashExpenses.filter(e => e.type === 'expense');
+const otherCashIncomes  = cashExpenses.filter(e => e.type === 'income');
+const otherCashExpenseTotal = otherCashExpenses.reduce((s, e) => s + e.amount, 0);
+const otherCashIncomeTotal  = otherCashIncomes.reduce((s, e) => s + e.amount, 0);
+const otherCashNet = otherCashIncomeTotal - otherCashExpenseTotal;
+
+// Total fixed checking bills (excluding the CC payment bill we filter out)
+const totalFixedChecking = checkingBills.reduce((s, b) => s + b.actual_amount, 0);
+
+// CC payment from checking = this month's cc_budget (variable) + this month's cc_recurring_budget
+// cc_budget[M] = variable component of M's CC payment; cc_recurring_budget[M] = recurring component
+// CC payment this month uses last billing cycle's recurring (ccBillsForPayment).
+// Default: estimated unless all of those are checked off.
+const allCCPaymentChecked = ccBillsForPayment.length > 0 && ccBillsForPayment.every(b => b.effective_paid);
+const ccRecurringMode: 'estimated' | 'actual' = allCCPaymentChecked ? 'actual' : 'estimated';
+const ccRecurringBudget = ccRecurringMode === 'actual' ? actualCCPaymentRecurring : estimatedCCPaymentRecurring;
+const ccPaymentAmount = Number(summary.cc_budget) + ccRecurringBudget;
+// Toggle in the CC Recurring section defaults based on whether displayed (this billing cycle) subs are all checked.
+const allCCRecurringChecked = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
+const ccDisplayMode: 'estimated' | 'actual' = allCCRecurringChecked ? 'actual' : 'estimated';
+
+// NET = Income + Other Cash Income - Fixed Checking Bills - CC Payment - Other Cash Expenses
+const netAmount = incomeTotal + otherCashIncomeTotal - totalFixedChecking - ccPaymentAmount - otherCashExpenseTotal;
+
+// Savings: user edits "to savings" amount, end balances are computed
+const checkingStart     = Number(summary.checking_before);
+const savingsStart      = Number(summary.savings_before);
+const savingsAllocation = Number(summary.savings_after) - savingsStart; // derived from stored end - start
+const checkingEnd       = checkingStart + netAmount - savingsAllocation;
+const savingsEnd        = savingsStart + savingsAllocation;
+
+// Returns the billing month for a sub in ccBillsNextPayment (subs billed THIS month, paid next month).
+//   due_day <= billingEndDay  →  charged this month (within current billing cycle)
+//   due_day >  billingEndDay  →  charged last month (after last month's cutoff → rolls into this cycle)
+function subBillingMonth(bill: typeof bills[0]): string | null {
+  if (!bill.due_day) return null;
+  const dueDay = Number(bill.due_day);
+  return dueDay <= defaultBillingEndDay ? month : prevMonth(month);
+}
+
+const label = monthLabel(month);
+const prev  = prevMonth(month);
+const next  = nextMonth(month);
+---
+
+<Layout title={label}>
+<!-- ── Month nav ── -->
+<div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+  <div class="flex items-center gap-3">
+    <a href={`/budget?month=${prev}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">←</a>
+    <h1 class="text-xl font-semibold text-stone-800">{label}</h1>
+    <a href={`/budget?month=${next}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">→</a>
+    {isNow && <span class="rounded-full bg-lime-50 px-2 py-0.5 text-xs text-brand-green border border-lime-200">Current</span>}
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- ── Monthly Cash Flow (NET) — the main feature, always on top ── -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="mb-5 rounded-xl border-2 border-lime-300 bg-surface-card p-5">
+  <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-stone-600">Monthly Cash Flow</h2>
+  <div class="space-y-2 text-sm">
+    <!-- Income -->
+    <div class="flex items-center justify-between">
+      <span class="text-stone-500">Total Income</span>
+      <span class="tabular-nums font-medium text-brand-green">{fmt(incomeTotal + otherCashIncomeTotal)}</span>
+    </div>
+    <div class="pl-4 space-y-1 text-xs text-stone-400">
+      <div class="flex justify-between"><span>Alex + Maham salaries</span><span class="tabular-nums">{fmt(Number(summary.income_alex) + Number(summary.income_maham))}</span></div>
+      {otherCashIncomes.map(e => (
+        <div class="flex justify-between"><span>{e.description}</span><span class="tabular-nums">{fmt(e.amount)}</span></div>
+      ))}
+    </div>
+
+    <!-- Fixed Bills (checking) -->
+    <div class="flex items-center justify-between pt-1">
+      <span class="text-stone-500">Fixed Bills (checking)</span>
+      <span class="tabular-nums font-medium text-brand-red">-{fmt(totalFixedChecking)}</span>
+    </div>
+
+    <!-- CC Payment -->
+    <div class="flex items-center justify-between">
+      <span class="text-stone-500">CC Payment</span>
+      <span class="tabular-nums font-medium text-brand-red" id="cf-cc-payment">-{fmt(ccPaymentAmount)}</span>
+    </div>
+    <div class="pl-4 space-y-1 text-xs text-stone-400">
+      <div class="flex justify-between"><span>Variable + Big</span><span class="tabular-nums cursor-pointer rounded px-1 hover:bg-surface-hover" data-field="cc_budget" data-month={month} title="Click to edit">{fmt(Number(summary.cc_budget))}</span></div>
+      <div class="flex justify-between"><span>Recurring <span class="text-stone-300">({ccRecurringMode === 'estimated' ? 'est' : 'act'})</span></span><span class="tabular-nums" id="cf-cc-recurring">{fmt(ccRecurringBudget)}</span></div>
+    </div>
+
+    <!-- Other Cash Expenses -->
+    {otherCashExpenseTotal > 0 && (
+      <div class="flex items-center justify-between">
+        <span class="text-stone-500">Other Cash Expenses</span>
+        <span class="tabular-nums font-medium text-brand-red">-{fmt(otherCashExpenseTotal)}</span>
+      </div>
+    )}
+    {otherCashExpenses.length > 0 && (
+      <div class="pl-4 space-y-1 text-xs text-stone-400">
+        {otherCashExpenses.map(e => (
+          <div class="flex justify-between"><span>{e.description}</span><span class="tabular-nums">{fmt(e.amount)}</span></div>
+        ))}
+      </div>
+    )}
+
+    <!-- NET -->
+    <div class="flex items-center justify-between border-t-2 border-surface-border pt-3 mt-2">
+      <span class="text-stone-800 font-semibold text-base">NET</span>
+      <span class={`tabular-nums text-xl font-bold ${netAmount >= 0 ? 'text-brand-green' : 'text-brand-red'}`} id="cf-net" data-net-amount={netAmount}>{fmt(netAmount)}</span>
+    </div>
+
+    <!-- Where the money goes -->
+    <div class="pt-3 mt-2 border-t border-surface-border space-y-3">
+      <!-- Savings -->
+      <div class="rounded-lg border border-surface-border bg-surface p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-stone-400">Savings</span>
+        </div>
+        <div class="flex items-center justify-between text-sm">
+          <span class="text-stone-500">Start</span>
+          <span class="editable-field tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-600 text-xs"
+            data-field="savings_before" data-month={month} data-endpoint="/api/budget/summary">{fmt(savingsStart)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1">
+          <span class="text-stone-500">Transfer to savings</span>
+          <span class="savings-allocation-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800 font-medium"
+            data-month={month} data-savings-start={savingsStart}>{fmt(savingsAllocation)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1 pt-1 border-t border-surface-border">
+          <span class="text-stone-600 font-medium">End</span>
+          <span class="tabular-nums font-semibold text-stone-800" id="savings-end-val">{fmt(savingsEnd)}</span>
+        </div>
+      </div>
+
+      <!-- Checking -->
+      <div class="rounded-lg border border-surface-border bg-surface p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-stone-400">Checking</span>
+        </div>
+        <div class="flex items-center justify-between text-sm">
+          <span class="text-stone-500">Start</span>
+          <span class="editable-field tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-600 text-xs"
+            data-field="checking_before" data-month={month} data-endpoint="/api/budget/summary">{fmt(checkingStart)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1 text-xs text-stone-400">
+          <span>+ NET</span>
+          <span class={`tabular-nums ${netAmount >= 0 ? 'text-brand-green' : 'text-brand-red'}`} id="cf-checking-net">{fmt(netAmount)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1 text-xs text-stone-400">
+          <span>- To savings</span>
+          <span class="tabular-nums" id="checking-savings-deduct">-{fmt(savingsAllocation)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1 pt-1 border-t border-surface-border">
+          <span class="text-stone-600 font-medium">End</span>
+          <span class={`tabular-nums font-semibold ${checkingEnd >= 0 ? 'text-stone-800' : 'text-brand-red'}`} id="checking-end-val">{fmt(checkingEnd)}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- ── Income + Fixed Bills — side by side ── -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div class="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+  <!-- Income -->
+  <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Income</h2>
+    <div class="space-y-2 text-sm">
+      {[
+        ['income_alex',  'Alex',  summary.income_alex],
+        ['income_maham', 'Maham', summary.income_maham],
+      ].map(([field, lbl, val]) => (
+        <div class="flex items-center justify-between">
+          <span class="text-stone-500">{lbl}</span>
+          <span class="editable-field tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
+            data-field={field} data-month={month} data-endpoint="/api/budget/summary">{fmt(Number(val))}</span>
+        </div>
+      ))}
+      {otherCashIncomes.length > 0 && otherCashIncomes.map(e => (
+        <div class="flex items-center justify-between">
+          <span class="text-stone-500">{e.description}</span>
+          <span class="tabular-nums text-brand-green">{fmt(e.amount)}</span>
+        </div>
+      ))}
+      <div class="flex justify-between border-t border-surface-border pt-2 mt-1">
+        <span class="text-stone-400 text-xs">Total</span>
+        <span class="text-brand-green font-semibold tabular-nums">{fmt(incomeTotal + otherCashIncomeTotal)}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fixed bills (checking) -->
+  <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Fixed Bills — Checking</h2>
+    <div class="space-y-1" id="checking-bills">
+      {checkingBills.map(b => (
+        <div class="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover group" data-bill-id={b.id}>
+          <div class="flex items-center gap-2 min-w-0">
+            <input type="checkbox" checked={b.effective_paid}
+              class="bill-toggle h-4 w-4 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
+              data-bill={b.id} data-month={month} data-is-cc="0" data-is-auto={b.is_auto ? '1' : '0'}
+            />
+            <span class={`text-sm truncate ${b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
+            {b.due_day && <span class="text-xs text-stone-400 flex-shrink-0">{b.due_day}th</span>}
+            {b.is_auto && <span class="text-xs text-stone-400 italic">auto</span>}
+          </div>
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class={`editable-bill-amount tabular-nums text-sm cursor-pointer rounded px-1.5 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
+              data-bill={b.id} data-month={month} data-is-cc="0">{fmt(b.actual_amount)}</span>
+            <button class="skip-bill opacity-0 group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-1 transition-opacity"
+              data-bill={b.id} data-month={month} title="Skip this month">✕</button>
+          </div>
+        </div>
+      ))}
+    </div>
+    <!-- CC Payment line -->
+    <div class="mt-2 border-t border-surface-border pt-2">
+      <div class="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover">
+        <div class="min-w-0">
+          <span class="text-sm text-stone-600">Credit Card Payment</span>
+        </div>
+        <span class="tabular-nums text-sm text-stone-700 flex-shrink-0" id="fb-cc-payment">{fmt(ccPaymentAmount)}</span>
+      </div>
+    </div>
+    <div class="mt-2 border-t border-surface-border pt-2 flex justify-between text-xs">
+      <span class="text-stone-400">Total from checking</span>
+      <span class="tabular-nums text-stone-500" id="fb-total-checking">{fmt(totalFixedChecking + ccPaymentAmount)}</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Other Cash (income + expenses) ── -->
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Other Cash</h2>
+    <span class="text-xs text-stone-400">Add income (rent, bonuses) or one-off expenses</span>
+  </div>
+  <div id="cash-expenses-list" class="space-y-1 mb-3">
+    {cashExpenses.length === 0 && <p class="text-xs text-stone-400 py-1">No other cash items this month.</p>}
+    {cashExpenses.map(e => (
+      <div class="flex items-center gap-2 text-sm group rounded-lg px-2 py-1.5 hover:bg-surface-hover" data-cash-id={e.id}>
+        <span class={`rounded px-1.5 py-0.5 text-xs flex-shrink-0 border ${(e as any).type==='income' ? 'border-lime-300 text-brand-green bg-lime-50' : 'border-surface-border text-stone-400'}`}>
+          {(e as any).type === 'income' ? 'income' : 'expense'}
+        </span>
+        <span class="text-stone-400 text-xs w-20 flex-shrink-0">{e.date ?? '—'}</span>
+        <span class="flex-1 text-stone-700 truncate">{e.description}</span>
+        {e.entity_id !== 'household' && (
+          <span class="rounded border border-surface-border px-1.5 py-0.5 text-xs capitalize text-stone-400 flex-shrink-0">{e.entity_id}</span>
+        )}
+        <span class={`tabular-nums flex-shrink-0 font-medium ${(e as any).type==='income' ? 'text-brand-green' : 'text-stone-700'}`}>
+          {(e as any).type === 'income' ? '+' : ''}{fmt(e.amount)}
+        </span>
+        <button class="delete-cash opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={e.id}>✕</button>
+      </div>
+    ))}
+  </div>
+  <form class="add-cash-form flex flex-wrap gap-2" data-month={month}>
+    <select name="type" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none flex-shrink-0">
+      <option value="expense">Expense</option>
+      <option value="income">Income</option>
+    </select>
+    <input name="date" type="date" class="w-32 rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none flex-shrink-0" />
+    <input name="description" placeholder="Description" required
+      class="flex-1 rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-sm text-stone-800 placeholder-stone-400 focus:border-brand-green focus:outline-none min-w-0" />
+    <select name="entity_id" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:outline-none flex-shrink-0">
+      <option value="household">Household</option>
+      <option value="kirby">Kirby</option>
+      <option value="kennedy">Kennedy</option>
+    </select>
+    <input name="amount" type="number" step="0.01" placeholder="0.00" required
+      class="w-24 rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-sm text-stone-800 tabular-nums focus:border-brand-green focus:outline-none flex-shrink-0" />
+    <button type="submit" class="rounded-lg bg-surface-hover border border-surface-border px-3 py-1.5 text-xs text-stone-600 hover:text-stone-800 flex-shrink-0">+ Add</button>
+  </form>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- ── Credit Card Section — all CC-related items together ── -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+
+<!-- CC Variable Spend (one row per card) -->
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Variable Spend</h2>
+    <a href="/connect" class="text-xs text-stone-400 hover:text-stone-500">Edit billing dates</a>
+  </div>
+
+  <div class="space-y-2" id="variable-spend-rows">
+    {ccSettings.map(s => {
+      const amount = variableSpendMap.get(s.card) ?? 0;
+      const [yr, mo] = month.split('-').map(Number);
+      const payD = new Date(yr, mo, 1);
+      const payLabel = `${payD.toLocaleString('en-US',{month:'long',year:'numeric'})} (due ${s.payment_day}th)`;
+
+      return (
+        <div class="flex items-center gap-4 rounded-lg border border-surface-border px-4 py-3 hover:bg-surface-hover">
+          <span class="text-sm font-medium text-stone-600 w-36 flex-shrink-0">{s.display_name}</span>
+          <span
+            class="var-spend-amount tabular-nums text-xl font-semibold cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
+            data-card={s.card} data-month={month}
+          >{fmt(amount)}</span>
+          <span class="text-xs text-stone-400 flex-1">paying {payLabel}</span>
+          <span class="text-xs text-stone-400">closes {s.billing_end_day}th</span>
+        </div>
+      );
+    })}
+  </div>
+
+  <div class="mt-3 flex justify-between border-t border-surface-border pt-2">
+    <span class="text-xs text-stone-400">Total variable CC</span>
+    <span class="tabular-nums text-sm font-medium text-stone-600" id="cc-variable-val">{fmt(ccVariable)}</span>
+  </div>
+</div>
+
+<!-- CC Budget Bar -->
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+  <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
+    <div>
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-1">Credit Card Spending Budget</h2>
+      <div class="flex items-baseline gap-2 flex-wrap">
+        <span id="cc-remaining-val"
+          class={`text-2xl font-bold tabular-nums ${ccRemaining < 0 ? 'text-brand-red' : ccRemaining < 500 ? 'text-brand-yellow' : 'text-brand-green'}`}>
+          {fmt(ccRemaining)}
+        </span>
+        <span class="text-xs text-stone-400">remaining of</span>
+        <span class="tabular-nums text-stone-600 text-sm cursor-pointer rounded px-1 hover:bg-surface-hover"
+          id="cc-budget-display" data-recurring={ccRecurringInVariable}
+          data-field="cc_budget" data-month={next}
+          title="Click to edit spending budget">{fmt(ccSpendBudget)}</span>
+      </div>
+    </div>
+    <div class="flex gap-4 text-right text-sm">
+      <div><p class="text-xs text-stone-400">Variable</p><p class="tabular-nums text-stone-600" id="cc-variable-val2">{fmt(ccVariableOnly)}</p></div>
+      <div><p class="text-xs text-stone-400">Big Purchases</p><p class="tabular-nums text-stone-500" id="cc-big-val">{fmt(ccBig)}</p></div>
+      <div><p class="text-xs text-stone-400">Total Charged</p><p class="tabular-nums font-medium text-stone-700" id="cc-total-val">{fmt(ccUsed)}</p></div>
+    </div>
+  </div>
+  <div class="h-2 rounded-full bg-surface overflow-hidden">
+    <div id="cc-bar" class={`h-full rounded-full transition-all ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
+      style={`width:${ccUsedPct.toFixed(1)}%`}></div>
+  </div>
+  <p class="mt-1 text-xs text-stone-400">Variable spend + big purchases count against budget. Recurring subscriptions are separate.</p>
+</div>
+
+<!-- CC Recurring Subscriptions -->
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4"
+  id="cc-recurring-section"
+  data-estimated={estimatedCCRecurring}
+  data-actual={actualCCRecurring}
+  data-payment-recurring={ccRecurringBudget}
+  data-cc-variable-budget={Number(summary.cc_budget)}
+  data-fixed-checking={totalFixedChecking}
+  data-other-cash-expense={otherCashExpenseTotal}
+  data-income-total={incomeTotal + otherCashIncomeTotal}
+  data-checking-start={checkingStart}
+  data-savings-allocation={savingsAllocation}
+  data-mode={ccDisplayMode}
+>
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Recurring Subscriptions</h2>
+    <div class="flex items-center gap-3 text-xs">
+      <button id="recurring-mode-toggle"
+        class="flex items-center gap-1.5 rounded-full border border-surface-border px-2.5 py-1 text-xs hover:bg-surface-hover transition-colors"
+        title="Toggle between estimated and actual recurring amounts"
+      >
+        <span id="mode-label-est" class={ccDisplayMode === 'estimated' ? 'font-semibold text-stone-700' : 'text-stone-400'}>{fmt(estimatedCCRecurring)}</span>
+        <span class="text-stone-300">/</span>
+        <span id="mode-label-act" class={ccDisplayMode === 'actual' ? 'font-semibold text-stone-700' : 'text-stone-400'}>{fmt(actualCCRecurring)}</span>
+      </button>
+      <span class="text-stone-300 text-xs recurring-mode-label">{ccDisplayMode === 'estimated' ? 'est' : 'act'}</span>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1" id="cc-bills">
+    {ccBillsNextPayment.map(b => {
+      const bm = subBillingMonth(b);
+      const billingLabel = bm ? `${new Date(bm+'-01').toLocaleString('en-US',{month:'short'})}` : '';
+      return (
+        <div class="flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover" data-bill-id={b.id}>
+          <div class="flex items-center gap-1.5 min-w-0">
+            <input type="checkbox" checked={b.effective_paid}
+              class="bill-toggle h-3.5 w-3.5 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
+              data-bill={b.id} data-month={next} data-is-cc="1" data-is-auto={b.is_auto ? '1' : '0'}
+            />
+            <span class={`text-xs truncate ${b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
+            {(billingLabel || b.due_day) && (
+              <span class="text-xs text-stone-300 flex-shrink-0" title="Billing month · due day">
+                {billingLabel}{b.due_day ? ` ${b.due_day}` : ''}
+              </span>
+            )}
+            {b.is_auto && <span class="text-xs text-stone-400">*</span>}
+          </div>
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
+              data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
+          </div>
+        </div>
+      );
+    })}
+  </div>
+
+  <p class="mt-2 text-xs text-stone-400">
+    Month label = billing month (when the charge hit the CC). Items auto-filtered to this payment cycle only. * = auto-checked (today &gt;= due date). These are included in the CC Payment amount in Fixed Bills above but do not count against the CC spending budget.
+  </p>
+</div>
+
+<!-- Big Purchases -->
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Big Purchases</h2>
+    <span class="text-xs text-stone-400">Count against CC budget</span>
+  </div>
+
+  <div id="big-cc-charges" class="space-y-3 mb-4">
+    {bigPayGroups.length === 0 && (
+      <p class="text-xs text-stone-400 py-2">No big purchases this month.</p>
+    )}
+    {bigPayGroups.map(([payMonth, charges]) => {
+      const d = new Date(payMonth + '-01');
+      const moName = payMonth === 'unknown' ? 'No Date Set'
+        : `Paying in ${d.toLocaleString('en-US',{month:'long',year:'numeric'})} (due ${ccSettings[0]?.payment_day??15}th)`;
+      const groupTotal = charges.reduce((s,c)=>s+c.amount,0);
+      return (
+        <div class="rounded-lg border border-surface-border overflow-hidden" data-big-pay-month={payMonth}>
+          <div class="flex items-center justify-between bg-surface px-3 py-2">
+            <span class={`text-xs font-semibold ${payMonth==='unknown'?'text-stone-400':'text-stone-600'}`}>{moName}</span>
+            <span class="big-group-total tabular-nums text-xs font-medium text-stone-600">{fmt(groupTotal)}</span>
+          </div>
+          <div class="big-charges-body divide-y divide-surface-border">
+            {charges.map(c => (
+              <div class="flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm" data-cc-id={c.id}>
+                <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">{c.date??'—'}</span>
+                <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id={c.id}>
+                  {ccSettings.map(s=><option value={s.card} selected={c.card===s.card}>{s.display_name}</option>)}
+                </select>
+                <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id={c.id}>{c.description}</span>
+                <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id={c.id}>{fmt(c.amount)}</span>
+                <button class="cc-toggle-big opacity-0 group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id={c.id} data-big="1" title="Move to Variable">↑</button>
+                <button class="delete-cc-charge opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={c.id}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    })}
+  </div>
+
+  <form id="add-big-form" class="flex flex-wrap gap-2 items-end" data-month={month} data-big="1">
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400">Date</label>
+      <input name="date" type="date" required class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none w-36" />
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400">Card</label>
+      <select name="card" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none">
+        {ccSettings.map(s=><option value={s.card}>{s.display_name}</option>)}
+      </select>
+    </div>
+    <div class="flex flex-col gap-1 flex-1 min-w-36">
+      <label class="text-xs text-stone-400">Description</label>
+      <input name="description" placeholder="e.g. TV, MacBook, Car repair" required class="rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-sm text-stone-800 placeholder-stone-400 focus:border-brand-green focus:outline-none" />
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400">Amount</label>
+      <input name="amount" type="number" step="0.01" placeholder="0.00" required class="w-24 rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-sm text-stone-800 tabular-nums focus:border-brand-green focus:outline-none" />
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400 invisible">x</label>
+      <button type="submit" class="rounded-lg bg-surface-hover border border-surface-border px-4 py-1.5 text-sm text-stone-600 hover:text-stone-800">+ Add Big Purchase</button>
+    </div>
+  </form>
+</div>
+</Layout>
+
+<script>
+const MONTH = new URLSearchParams(location.search).get('month') ??
+  (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
+
+function usd(n: number) {
+  return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2}).format(n);
+}
+async function api(url: string, method: string, body: object) {
+  const r = await fetch(url, { method, headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+  if (!r.ok) { const e = await r.json().catch(()=>({})) as {error?:string}; throw new Error(e.error??'Error'); }
+  return r.json();
+}
+
+// ── Recompute CC remaining from DOM ──────────────────────────────────────────
+// Formula: remaining = budget - (variable - recurring) - big purchases
+function recomputeCC() {
+  const budgetEl = document.getElementById('cc-budget-display') as HTMLElement;
+  const budget    = parseFloat(budgetEl?.textContent?.replace(/[$,]/g,'') ?? '5000');
+  const recurring = parseFloat(budgetEl?.dataset.recurring ?? '0');
+
+  let variableCC = 0;
+  document.querySelectorAll<HTMLElement>('.var-spend-amount').forEach(el => {
+    variableCC += parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+  });
+  const variableOnly = Math.max(0, variableCC - recurring);
+
+  let bigCC = 0;
+  document.querySelectorAll('#big-cc-charges [data-cc-id]').forEach(row => {
+    bigCC += parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
+  });
+
+  const total     = variableOnly + bigCC;
+  const remaining = budget - total;
+  const pct       = Math.min(total / budget * 100, 100);
+
+  const remEl = document.getElementById('cc-remaining-val');
+  if (remEl) {
+    remEl.textContent = usd(remaining);
+    remEl.className = remEl.className.replace(/text-brand-\w+/g,'') + (remaining < 0 ? ' text-brand-red' : remaining < 500 ? ' text-brand-yellow' : ' text-brand-green');
+  }
+  const varEl = document.getElementById('cc-variable-val'); if (varEl) varEl.textContent = usd(variableOnly);
+  const varEl2 = document.getElementById('cc-variable-val2'); if (varEl2) varEl2.textContent = usd(variableOnly);
+  const bigEl = document.getElementById('cc-big-val');       if (bigEl) bigEl.textContent = usd(bigCC);
+  const totEl = document.getElementById('cc-total-val');     if (totEl) totEl.textContent = usd(total);
+  const bar   = document.getElementById('cc-bar') as HTMLElement;
+  if (bar) { bar.style.width = pct.toFixed(1)+'%'; bar.className = bar.className.replace(/bg-brand-\w+/g,'')+(pct>=100?' bg-brand-red':pct>=80?' bg-brand-yellow':' bg-brand-green'); }
+}
+
+// ── Estimated / Actual recurring toggle ──────────────────────────────────────
+// Swaps the recurring component of CC Payment and cascades to NET + Checking End.
+function recalcCashFlow(recurringVal: number) {
+  const sec  = document.getElementById('cc-recurring-section') as HTMLElement;
+  const ccVarBudget      = parseFloat(sec.dataset.ccVariableBudget ?? '0');
+  const fixedChecking    = parseFloat(sec.dataset.fixedChecking ?? '0');
+  const otherCashExpense = parseFloat(sec.dataset.otherCashExpense ?? '0');
+  const incomeTotal      = parseFloat(sec.dataset.incomeTotal ?? '0');
+  const checkStart       = parseFloat(sec.dataset.checkingStart ?? '0');
+  const savingsAlloc     = parseFloat(sec.dataset.savingsAllocation ?? '0');
+
+  const ccPayment  = ccVarBudget + recurringVal;
+  const net        = incomeTotal - fixedChecking - ccPayment - otherCashExpense;
+  const checkEnd   = checkStart + net - savingsAlloc;
+
+  // Update all affected elements
+  const u = (id: string, v: number, prefix = '') => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = prefix + usd(v);
+  };
+  u('cf-cc-payment',    ccPayment, '-');
+  u('cf-cc-recurring',  recurringVal);
+  u('cf-net',           net);
+  u('cf-checking-net',  net);
+  u('checking-end-val', checkEnd);
+  u('fb-cc-payment',    ccPayment);
+  u('fb-total-checking', fixedChecking + ccPayment);
+
+  // Colour NET
+  const netEl = document.getElementById('cf-net');
+  if (netEl) {
+    netEl.className = netEl.className.replace(/text-brand-\w+/g, '') + (net >= 0 ? ' text-brand-green' : ' text-brand-red');
+    netEl.dataset.netAmount = String(net);
+  }
+  const netEl2 = document.getElementById('cf-checking-net');
+  if (netEl2) netEl2.className = netEl2.className.replace(/text-brand-\w+/g, '') + (net >= 0 ? ' text-brand-green' : ' text-brand-red');
+  const checkEndEl = document.getElementById('checking-end-val');
+  if (checkEndEl) checkEndEl.className = checkEndEl.className.replace(/text-brand-red|text-stone-800/g, '') + (checkEnd >= 0 ? ' text-stone-800' : ' text-brand-red');
+}
+
+document.getElementById('recurring-mode-toggle')?.addEventListener('click', () => {
+  const sec  = document.getElementById('cc-recurring-section') as HTMLElement;
+  const mode = sec.dataset.mode === 'estimated' ? 'actual' : 'estimated';
+  sec.dataset.mode = mode;
+  const estVal = parseFloat(sec.dataset.estimated ?? '0');
+  const actVal = parseFloat(sec.dataset.actual ?? '0');
+  const val    = mode === 'estimated' ? estVal : actVal;
+
+  // Highlight active label in the toggle button itself
+  const estLabel = document.getElementById('mode-label-est');
+  const actLabel = document.getElementById('mode-label-act');
+  if (estLabel) estLabel.className = mode === 'estimated' ? 'font-semibold text-stone-700' : 'text-stone-400';
+  if (actLabel) actLabel.className = mode === 'actual'    ? 'font-semibold text-stone-700' : 'text-stone-400';
+
+  // Update the section's own est/act badge (scoped — not page-wide)
+  sec.querySelectorAll('.recurring-mode-label').forEach(el => {
+    el.textContent = mode === 'estimated' ? 'est' : 'act';
+  });
+
+  // This toggle reflects THIS billing cycle's recurring (paid next month), which
+  // is the amount netted out of the CC spending-budget bar. Update the bar only.
+  // CC Payment (= last cycle's recurring, paid this month) is unaffected.
+  const budgetEl = document.getElementById('cc-budget-display') as HTMLElement | null;
+  if (budgetEl) {
+    budgetEl.dataset.recurring = String(val);
+    recomputeCC();
+  }
+});
+
+// ── CC budget click-to-edit ───────────────────────────────────────────────────
+// Both the spending-budget display and the Variable+Big sub-line use data-field="cc_budget".
+// The spending budget saves to next month; Variable+Big saves to current month.
+document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el => {
+  el.addEventListener('click', () => {
+    const fieldMonth = el.dataset.month!;
+    const cur = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+    const inp = document.createElement('input');
+    inp.type='number'; inp.step='0.01'; inp.value=String(cur);
+    inp.className='w-28 rounded border border-brand-green bg-surface px-2 py-0.5 text-sm tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    async function save() {
+      const v = parseFloat(inp.value);
+      el.textContent = isNaN(v) ? usd(cur) : usd(v);
+      inp.replaceWith(el);
+      if (!isNaN(v) && v !== cur) {
+        await api('/api/budget/summary','POST',{month:fieldMonth,cc_budget:v}).catch(()=>{});
+        // If this is the spending budget (next month), update the bar too
+        if (el.id === 'cc-budget-display') {
+          el.dataset.recurring = el.dataset.recurring ?? '0';
+          recomputeCC();
+        }
+        // If this is the Variable+Big line, recalc cash flow
+        const sec = document.getElementById('cc-recurring-section') as HTMLElement;
+        if (sec) {
+          sec.dataset.ccVariableBudget = String(isNaN(v) ? cur : v);
+          // CC Payment's recurring = last billing cycle (paid this month), independent of the display toggle.
+          const paymentRecurring = parseFloat(sec.dataset.paymentRecurring ?? '0');
+          recalcCashFlow(paymentRecurring);
+        }
+      }
+    }
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+  });
+});
+
+// ── Variable spend click-to-edit (one amount per card) ───────────────────────
+document.querySelectorAll<HTMLElement>('.var-spend-amount').forEach(el => {
+  el.addEventListener('click', () => {
+    const card  = el.dataset.card!;
+    const month = el.dataset.month!;
+    const cur   = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+    const inp   = document.createElement('input');
+    inp.type='number'; inp.step='0.01'; inp.value=String(cur);
+    inp.className='w-32 rounded border border-brand-green bg-white px-2 py-0.5 text-xl font-semibold tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    async function save() {
+      const v = parseFloat(inp.value);
+      el.textContent = isNaN(v) ? usd(cur) : usd(v);
+      inp.replaceWith(el);
+      if (!isNaN(v)) {
+        await fetch('/api/budget/cc-variable', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({month, card, amount: v}),
+        }).catch(()=>{});
+        recomputeCC();
+      }
+    }
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+  });
+});
+
+// ── Inline field edit (click to edit) ────────────────────────────────────────
+function bindInlineEdit(el: HTMLElement) {
+  el.addEventListener('click', () => {
+    const field    = el.dataset.field!;
+    const endpoint = el.dataset.endpoint!;
+    const cur      = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+    const inp      = document.createElement('input');
+    inp.type = 'number'; inp.step = '0.01'; inp.value = String(cur);
+    inp.className = 'w-28 rounded border border-brand-green bg-white px-2 py-0.5 text-sm tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    async function save() {
+      const v = parseFloat(inp.value);
+      el.textContent = isNaN(v) ? usd(cur) : usd(v);
+      inp.replaceWith(el);
+      if (!isNaN(v)) { await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{}); recomputeCC(); }
+    }
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+  });
+}
+document.querySelectorAll<HTMLElement>('.editable-field').forEach(bindInlineEdit);
+
+// ── Savings allocation edit ─────────────────────────────────────────────────
+// When user changes "Transfer to savings", update savings_after on backend
+// and recompute both end balances in the DOM
+document.querySelectorAll<HTMLElement>('.savings-allocation-edit').forEach(el => {
+  el.addEventListener('click', () => {
+    const savingsStart = parseFloat(el.dataset.savingsStart ?? '0');
+    const cur = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = '0.01'; inp.value = String(cur);
+    inp.className = 'w-28 rounded border border-brand-green bg-white px-2 py-0.5 text-sm tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    async function save() {
+      const v = parseFloat(inp.value) || 0;
+      el.textContent = usd(v);
+      inp.replaceWith(el);
+      // Save savings_after = savings_start + allocation
+      const newSavingsAfter = savingsStart + v;
+      await api('/api/budget/summary', 'POST', { month: MONTH, savings_after: newSavingsAfter }).catch(() => {});
+      // Update DOM: savings end
+      const savEndEl = document.getElementById('savings-end-val');
+      if (savEndEl) savEndEl.textContent = usd(newSavingsAfter);
+      // Update DOM: checking end = checking_start + NET - savings_allocation
+      const checkStart = parseFloat(document.querySelector('[data-field="checking_before"]')?.textContent?.replace(/[$,]/g,'') ?? '0');
+      // Parse NET from the NET display
+      const netEl = document.querySelector('[data-net-amount]') as HTMLElement;
+      const netVal = netEl ? parseFloat(netEl.dataset.netAmount ?? '0') : 0;
+      const newCheckEnd = checkStart + netVal - v;
+      const checkEndEl = document.getElementById('checking-end-val');
+      if (checkEndEl) { checkEndEl.textContent = usd(newCheckEnd); checkEndEl.className = checkEndEl.className.replace(/text-brand-\w+|text-stone-800/g, '') + (newCheckEnd >= 0 ? ' text-stone-800' : ' text-brand-red'); }
+      // Also save checking_after
+      await api('/api/budget/summary', 'POST', { month: MONTH, checking_after: newCheckEnd }).catch(() => {});
+      // Update deduction display
+      const deductEl = document.getElementById('checking-savings-deduct');
+      if (deductEl) deductEl.textContent = '-' + usd(v);
+    }
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { el.textContent = usd(cur); inp.replaceWith(el); } });
+  });
+});
+
+// ── Bill amount edit ─────────────────────────────────────────────────────────
+document.querySelectorAll<HTMLElement>('.editable-bill-amount').forEach(el => {
+  el.addEventListener('click', () => {
+    const billId = el.dataset.bill!;
+    const isCC   = el.dataset.isCc === '1';
+    const isPaid = (el.closest('[data-bill-id]')?.querySelector('.bill-toggle') as HTMLInputElement)?.checked ?? false;
+    const cur    = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
+    const inp    = document.createElement('input');
+    inp.type='number'; inp.step='0.01'; inp.value=String(cur);
+    inp.className='w-20 rounded border border-brand-green bg-white px-1.5 py-0.5 text-xs tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    async function save() {
+      const v = parseFloat(inp.value);
+      el.textContent = isNaN(v) ? usd(cur) : usd(v);
+      inp.replaceWith(el);
+      if (!isNaN(v)) { await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{}); recomputeCC(); }
+    }
+    inp.addEventListener('blur',save);
+    inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+  });
+});
+
+// ── Bill toggle ───────────────────────────────────────────────────────────────
+document.querySelectorAll<HTMLInputElement>('.bill-toggle').forEach(cb => {
+  cb.addEventListener('change', async () => {
+    const billId = cb.dataset.bill!;
+    const isCC   = cb.dataset.isCc === '1';
+    const isPaid = cb.checked;
+    const amtEl  = cb.closest('[data-bill-id]')?.querySelector('.editable-bill-amount') as HTMLElement;
+    const amt    = parseFloat(amtEl?.textContent?.replace(/[$,]/g,'') ?? '0');
+    const nameEl = cb.closest('[data-bill-id]')?.querySelectorAll('span')[0];
+    if (nameEl) nameEl.className = nameEl.className.replace(/text-zinc-\d+/g, isPaid ? 'text-stone-600' : 'text-stone-400');
+    // Clear auto indicator
+    cb.dataset.isAuto = '0';
+    try { await api('/api/budget/bill-payment','POST',{month:cb.dataset.month ?? MONTH,bill_id:billId,amount:amt,is_paid:isPaid,is_cc:isCC}); }
+    catch { cb.checked = !isPaid; }
+    recomputeCC();
+  });
+});
+
+// ── Billing settings inline edit ─────────────────────────────────────────────
+function bindSettingEdit(selector: string, field: string) {
+  document.querySelectorAll<HTMLElement>(selector).forEach(el => {
+    el.addEventListener('click', () => {
+      const card = el.dataset.card!;
+      const cur  = parseInt(el.textContent!) || 0;
+      const inp  = document.createElement('input');
+      inp.type='number'; inp.min='1'; inp.max='31'; inp.value=String(cur);
+      inp.className='w-10 rounded border border-brand-green bg-white px-1 py-0 text-xs tabular-nums focus:outline-none';
+      el.replaceWith(inp); inp.focus(); inp.select();
+      async function save() {
+        const v = parseInt(inp.value);
+        el.textContent = isNaN(v) ? String(cur)+'th' : v+'th'+(field==='payment_day'?' of next mo':'');
+        inp.replaceWith(el);
+        if (!isNaN(v)) await api('/api/budget/cc-settings','POST',{card,[field]:v}).catch(()=>{});
+      }
+      inp.addEventListener('blur',save);
+      inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape'){inp.replaceWith(el);} });
+    });
+  });
+}
+bindSettingEdit('.billing-end-edit','billing_end_day');
+bindSettingEdit('.payment-day-edit','payment_day');
+
+// ── CC desc / amount edit ────────────────────────────────────────────────────
+document.querySelectorAll<HTMLElement>('.editable-cc-desc, .editable-cc-amount').forEach(el => {
+  el.addEventListener('click', () => {
+    const id = el.dataset.id!;
+    const isAmt = el.classList.contains('editable-cc-amount');
+    const cur   = isAmt ? parseFloat(el.textContent!.replace(/[$,]/g,'')) : el.textContent!.trim();
+    const inp   = document.createElement('input');
+    inp.type = isAmt ? 'number' : 'text'; if(isAmt) inp.step='0.01';
+    inp.value = String(cur);
+    inp.className = `rounded border border-brand-green bg-white px-2 py-0.5 text-sm focus:outline-none ${isAmt?'w-24 tabular-nums':'flex-1'}`;
+    el.replaceWith(inp); inp.focus(); if(isAmt) inp.select();
+    async function save() {
+      const v = isAmt ? parseFloat(inp.value) : inp.value.trim();
+      el.textContent = isAmt ? usd(Number(v)) : String(v);
+      inp.replaceWith(el);
+      if(v || v===0) { await api('/api/budget/cc-charge','PATCH',{id,[isAmt?'amount':'description']:v}).catch(()=>{}); if(isAmt) recomputeCC(); }
+    }
+    inp.addEventListener('blur',save);
+    inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape')inp.replaceWith(el); });
+  });
+});
+
+// ── CC card select ────────────────────────────────────────────────────────────
+document.querySelectorAll<HTMLSelectElement>('.cc-card-select').forEach(sel => {
+  sel.addEventListener('change', async () => {
+    await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,card:sel.value}).catch(()=>{});
+  });
+});
+
+// ── Toggle big purchase ───────────────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.cc-toggle-big').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id    = btn.dataset.id!;
+    const isBig = btn.dataset.big === '1';
+    const newBig = !isBig;
+    try {
+      await api('/api/budget/cc-charge','PATCH',{id,is_big_purchase:newBig});
+      btn.dataset.big = newBig ? '1' : '0';
+      btn.title = newBig ? 'Move to variable' : 'Mark as big purchase';
+      btn.textContent = newBig ? '↑' : '★';
+      // Refresh the group label on the row
+      const bigTag = btn.closest('[data-cc-id]')?.querySelector('.rounded.border');
+      recomputeCC();
+    } catch { alert('Update failed'); }
+  });
+});
+
+// ── Delete CC charge ──────────────────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.delete-cc-charge').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id  = btn.dataset.id!;
+    const row = btn.closest('[data-cc-id]') as HTMLElement;
+    await fetch(`/api/budget/cc-charge?id=${id}`,{method:'DELETE'}).catch(()=>null);
+    row.remove();
+    // Remove group card if empty
+    const group = row.closest('.rounded-lg.border');
+    if (group && !group.querySelectorAll('[data-cc-id]').length) group.remove();
+    recomputeCC();
+  });
+});
+
+// ── Fetch billing settings (needed for big purchase payment-month labels) ─────
+let billingSettings: Record<string, {billing_end_day:number; payment_day:number; display_name:string}> = {};
+fetch('/api/budget/cc-settings').then(r=>r.json()).then((d:any) => {
+  for (const s of (d.settings ?? [])) billingSettings[s.card] = s;
+});
+
+function payMonthFor(date: string, card: string): {pm:string; pmFmt:string} {
+  if (!date || !billingSettings[card]) return {pm:'unknown', pmFmt:'No Date Set'};
+  const [yr,mo,dy] = date.split('-').map(Number);
+  const endDay = billingSettings[card].billing_end_day;
+  const payDay = billingSettings[card].payment_day;
+  const d = dy <= endDay ? new Date(yr, mo, 1) : new Date(yr, mo+1, 1);
+  const pm = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  const pmFmt = `Paying in ${d.toLocaleString('en-US',{month:'long',year:'numeric'})} (due ${payDay}th)`;
+  return {pm, pmFmt};
+}
+
+// ── Add big purchase ──────────────────────────────────────────────────────────
+const addBigForm = document.getElementById('add-big-form') as HTMLFormElement;
+addBigForm?.addEventListener('submit', async e => {
+  e.preventDefault();
+  const data = new FormData(addBigForm);
+  const date=String(data.get('date')??'').trim(), card=String(data.get('card')),
+        desc=String(data.get('description')??'').trim(), amount=parseFloat(String(data.get('amount')));
+  if (!date||!desc||isNaN(amount)) return;
+  try {
+    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true}) as {id:string;payment_month:string|null};
+    const pm = res.payment_month ?? 'unknown';
+    const {pmFmt} = payMonthFor(date, card);
+    const container = document.getElementById('big-cc-charges')!;
+    const empty = container.querySelector('p'); if (empty) empty.remove();
+
+    let groupEl = container.querySelector(`[data-big-pay-month="${pm}"]`) as HTMLElement | null;
+    if (!groupEl) {
+      groupEl = document.createElement('div');
+      groupEl.setAttribute('data-big-pay-month', pm);
+      groupEl.className = 'rounded-lg border border-surface-border overflow-hidden';
+      groupEl.innerHTML = `
+        <div class="flex items-center justify-between bg-surface px-3 py-2">
+          <span class="text-xs font-semibold text-stone-600">${pmFmt}</span>
+          <span class="big-group-total tabular-nums text-xs font-medium text-stone-600">${usd(0)}</span>
+        </div>
+        <div class="big-charges-body divide-y divide-surface-border"></div>
+      `;
+      container.appendChild(groupEl);
+    }
+    const cardOptions = Object.entries(billingSettings).map(([c,s])=>`<option value="${c}"${c===card?' selected':''}>${(s as any).display_name}</option>`).join('');
+    const row = document.createElement('div');
+    row.dataset.ccId = res.id;
+    row.className = 'flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm';
+    row.innerHTML = `
+      <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">${date}</span>
+      <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id="${res.id}">${cardOptions}</select>
+      <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id="${res.id}">${desc}</span>
+      <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id="${res.id}">${usd(amount)}</span>
+      <button class="delete-cc-charge opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
+    `;
+    groupEl.querySelector('.big-charges-body')!.appendChild(row);
+    const tot = groupEl.querySelector('.big-group-total');
+    if (tot) { const c=parseFloat(tot.textContent!.replace(/[$,]/g,''))||0; tot.textContent=usd(c+amount); }
+    row.querySelector('.delete-cc-charge')?.addEventListener('click', async () => {
+      await fetch(`/api/budget/cc-charge?id=${res.id}`,{method:'DELETE'});
+      row.remove();
+      if (!groupEl!.querySelectorAll('[data-cc-id]').length) groupEl!.remove();
+      recomputeCC();
+    });
+    addBigForm.reset(); recomputeCC();
+  } catch(err){alert(String(err));}
+});
+
+// ── Skip bill for this month ──────────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.skip-bill').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const billId = btn.dataset.bill!;
+    const month  = btn.dataset.month!;
+    if (!confirm('Skip this bill for this month only?')) return;
+    await fetch('/api/budget/bill-skip', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ month, bill_id: billId, skip: true }),
+    });
+    const row = btn.closest('[data-bill-id]') as HTMLElement;
+    row?.remove();
+    // Refresh the page so totals recalculate
+    window.location.reload();
+  });
+});
+
+// ── Delete cash expense ───────────────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.delete-cash').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id=btn.dataset.id!, row=btn.closest('[data-cash-id]') as HTMLElement;
+    await fetch(`/api/budget/cash-expense?id=${id}`,{method:'DELETE'});
+    row.remove();
+  });
+});
+
+// ── Add cash expense (income or expense) ──────────────────────────────────────
+document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const d    = new FormData(form);
+    const type = String(d.get('type')||'expense');
+    const date = String(d.get('date')||'').trim()||null;
+    const desc = String(d.get('description')||'').trim();
+    const entity_id = String(d.get('entity_id')||'household');
+    const amt  = parseFloat(String(d.get('amount')));
+    if (!desc||isNaN(amt)) return;
+    try {
+      const res = await api('/api/budget/cash-expense','POST',{month:MONTH,date,description:desc,amount:amt,type,entity_id}) as {id:string};
+      const list=document.getElementById('cash-expenses-list')!;
+      const empty=list.querySelector('p'); if(empty) empty.remove();
+      const isIncome = type==='income';
+      const row=document.createElement('div'); row.dataset.cashId=res.id;
+      row.className='flex items-center gap-2 text-sm group rounded-lg px-2 py-1.5 hover:bg-surface-hover';
+      row.innerHTML=`
+        <span class="rounded px-1.5 py-0.5 text-xs flex-shrink-0 border ${isIncome?'border-lime-300 text-brand-green bg-lime-50':'border-surface-border text-stone-400'}">${type}</span>
+        <span class="text-stone-400 text-xs w-20 flex-shrink-0">${date??'—'}</span>
+        <span class="flex-1 text-stone-700 truncate">${desc}</span>
+        ${entity_id!=='household'?`<span class="rounded border border-surface-border px-1.5 py-0.5 text-xs capitalize text-stone-400 flex-shrink-0">${entity_id}</span>`:''}
+        <span class="tabular-nums flex-shrink-0 font-medium ${isIncome?'text-brand-green':'text-stone-700'}">${isIncome?'+':''}${usd(amt)}</span>
+        <button class="delete-cash opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
+      `;
+      list.appendChild(row);
+      row.querySelector('.delete-cash')?.addEventListener('click',async()=>{await fetch(`/api/budget/cash-expense?id=${res.id}`,{method:'DELETE'});row.remove();});
+      form.reset();
+    } catch(err){alert(String(err));}
+  });
+});
+</script>

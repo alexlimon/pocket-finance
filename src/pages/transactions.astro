@@ -1,0 +1,163 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import { formatCurrency, type TransactionRow } from '../lib/finance';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) {
+  return Astro.redirect('/login');
+}
+
+// ── Query params ──────────────────────────────────────────────────────────────
+const sp       = Astro.url.searchParams;
+const entity   = sp.get('entity')   ?? 'all';
+const category = sp.get('category') ?? 'all';
+const month    = sp.get('month')    ?? new Date().toISOString().slice(0, 7);
+const q        = sp.get('q')        ?? '';
+
+// ── Data fetch ────────────────────────────────────────────────────────────────
+const client = getClient(env);
+let transactions: TransactionRow[] = [];
+let categories: { id: string; name: string }[] = [];
+
+try {
+  const [txnRes, catRes] = await Promise.all([
+    client.execute({
+      sql: `
+        SELECT t.*, c.name as category_name
+        FROM transactions t
+        LEFT JOIN categories c ON t.category_id = c.id
+        WHERE t.is_hidden = 0
+          AND t.date LIKE ?
+          ${entity !== 'all' ? 'AND t.entity_id = ?' : ''}
+          ${category !== 'all' ? 'AND t.category_id = ?' : ''}
+          ${q ? 'AND (t.merchant_clean LIKE ? OR t.merchant_raw LIKE ?)' : ''}
+        ORDER BY t.date DESC, t.created_at DESC
+        LIMIT 500
+      `,
+      args: [
+        `${month}%`,
+        ...(entity !== 'all' ? [entity] : []),
+        ...(category !== 'all' ? [category] : []),
+        ...(q ? [`%${q}%`, `%${q}%`] : []),
+      ],
+    }),
+    client.execute('SELECT id, name FROM categories ORDER BY name'),
+  ]);
+
+  transactions = txnRes.rows as unknown as TransactionRow[];
+  categories   = catRes.rows as unknown as { id: string; name: string }[];
+} finally {
+  client.close();
+}
+
+const totalSpend  = transactions.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+const totalIncome = transactions.filter(t => t.amount < 0).reduce((s, t) => s + Math.abs(t.amount), 0);
+---
+
+<Layout title="Transactions">
+  <div class="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+    <div>
+      <h1 class="text-xl font-semibold text-stone-800">Transactions</h1>
+      <p class="text-sm text-stone-400">
+        {transactions.length} transactions ·
+        <span class="text-brand-red">{formatCurrency(totalSpend)} out</span>
+        ·
+        <span class="text-brand-green">{formatCurrency(totalIncome)} in</span>
+      </p>
+    </div>
+  </div>
+
+  <!-- ── Filters ── -->
+  <form method="GET" class="mb-4 flex flex-wrap gap-2">
+    <input
+      name="q"
+      value={q}
+      placeholder="Search merchant…"
+      class="rounded-lg border border-surface-border bg-surface-card px-3 py-2 text-sm text-stone-800 placeholder-zinc-600 focus:border-brand-green focus:outline-none"
+    />
+
+    <input
+      name="month"
+      type="month"
+      value={month}
+      class="rounded-lg border border-surface-border bg-surface-card px-3 py-2 text-sm text-stone-800 focus:border-brand-green focus:outline-none"
+    />
+
+    <select
+      name="entity"
+      class="rounded-lg border border-surface-border bg-surface-card px-3 py-2 text-sm text-stone-800 focus:border-brand-green focus:outline-none"
+    >
+      <option value="all" selected={entity === 'all'}>All entities</option>
+      <option value="household" selected={entity === 'household'}>Household</option>
+      <option value="kirby" selected={entity === 'kirby'}>Kirby</option>
+      <option value="kennedy" selected={entity === 'kennedy'}>Kennedy</option>
+    </select>
+
+    <select
+      name="category"
+      class="rounded-lg border border-surface-border bg-surface-card px-3 py-2 text-sm text-stone-800 focus:border-brand-green focus:outline-none"
+    >
+      <option value="all" selected={category === 'all'}>All categories</option>
+      {categories.map(c => (
+        <option value={c.id} selected={category === c.id}>{c.name}</option>
+      ))}
+    </select>
+
+    <button
+      type="submit"
+      class="rounded-lg bg-surface-hover border border-surface-border px-4 py-2 text-sm text-stone-600 hover:text-stone-800"
+    >Filter</button>
+  </form>
+
+  <!-- ── Transaction table ── -->
+  <div class="rounded-xl border border-surface-border bg-surface-card overflow-hidden">
+    {transactions.length === 0 ? (
+      <p class="p-8 text-center text-sm text-stone-400">No transactions found.</p>
+    ) : (
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-surface-border text-left">
+            <th class="px-4 py-3 text-xs font-medium text-stone-400">Date</th>
+            <th class="px-4 py-3 text-xs font-medium text-stone-400">Merchant</th>
+            <th class="px-4 py-3 text-xs font-medium text-stone-400 hidden sm:table-cell">Category</th>
+            <th class="px-4 py-3 text-xs font-medium text-stone-400 hidden md:table-cell">Entity</th>
+            <th class="px-4 py-3 text-xs font-medium text-stone-400 text-right">Amount</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-surface-border">
+          {transactions.map(t => {
+            const isIncome = (t as any).amount < 0;
+            return (
+              <tr class="group hover:bg-surface-hover">
+                <td class="px-4 py-3 text-stone-500 tabular-nums whitespace-nowrap">
+                  {(t as any).date}
+                  {Boolean((t as any).is_pending) && (
+                    <span class="ml-1 rounded bg-brand-yellow/10 px-1 py-0.5 text-xs text-brand-yellow">pending</span>
+                  )}
+                </td>
+                <td class="px-4 py-3 text-stone-700 max-w-[200px] truncate">
+                  {(t as any).merchant_clean ?? (t as any).merchant_raw ?? '—'}
+                </td>
+                <td class="px-4 py-3 text-stone-400 hidden sm:table-cell">
+                  {(t as any).category_name ?? <span class="text-stone-400">—</span>}
+                </td>
+                <td class="px-4 py-3 hidden md:table-cell">
+                  {(t as any).entity_id !== 'household' && (
+                    <span class="rounded border border-surface-border px-1.5 py-0.5 text-xs capitalize text-stone-400">
+                      {(t as any).entity_id}
+                    </span>
+                  )}
+                </td>
+                <td class={`px-4 py-3 text-right tabular-nums font-medium ${isIncome ? 'text-brand-green' : 'text-stone-800'}`}>
+                  {isIncome ? '+' : ''}{formatCurrency(Math.abs((t as any).amount))}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    )}
+  </div>
+</Layout>

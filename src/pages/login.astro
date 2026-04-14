@@ -1,0 +1,63 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession, hasPassword } from '../lib/auth';
+
+const env = Astro.locals.runtime.env;
+
+// Already logged in → go to dashboard
+if (await verifySession(Astro.request, env)) {
+  return Astro.redirect('/');
+}
+
+// No password set → first-time setup
+if (!(await hasPassword(env))) {
+  return Astro.redirect('/setup');
+}
+
+const error = Astro.url.searchParams.get('error');
+---
+
+<Layout title="Sign In" showNav={false}>
+  <div class="flex min-h-[80vh] items-center justify-center">
+    <div class="w-full max-w-sm">
+      <div class="mb-8 text-center">
+        <span class="text-4xl">🍋</span>
+        <h1 class="mt-3 text-2xl font-semibold text-stone-800">LimeTiramisu</h1>
+        <p class="mt-1 text-sm text-stone-400">Your household financial planner</p>
+      </div>
+
+      <div class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-lg shadow-stone-200/50">
+        {error && (
+          <div class="mb-4 rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-brand-red">
+            Incorrect password. Try again.
+          </div>
+        )}
+
+        <form action="/api/auth/login" method="POST" class="space-y-4">
+          <div>
+            <label for="password" class="block text-xs font-medium text-stone-500 mb-1.5">
+              Household password
+            </label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              required
+              autofocus
+              autocomplete="current-password"
+              class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-sm text-stone-800 placeholder-stone-400 focus:border-brand-green focus:outline-none focus:ring-1 focus:ring-brand-green"
+              placeholder="Enter password"
+            />
+          </div>
+
+          <button
+            type="submit"
+            class="w-full rounded-lg bg-brand-green px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-brand-green focus:ring-offset-2 focus:ring-offset-surface-card"
+          >
+            Sign in
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+</Layout>

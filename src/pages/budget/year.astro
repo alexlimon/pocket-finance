@@ -1,0 +1,235 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { verifySession } from '../../lib/auth';
+import { getClient } from '../../lib/db';
+import { fmt, totalIncome, type MonthlySummary, type BillRow, type CCCharge } from '../../lib/budget';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+
+const year = Astro.url.searchParams.get('year') ?? String(new Date().getFullYear());
+const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, '0')}`);
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+const client = getClient(env);
+let summaries: Record<string, MonthlySummary> = {};
+let billsByMonth: Record<string, BillRow[]> = {};
+let ccByMonth: Record<string, CCCharge[]> = {};
+
+try {
+  const [sumRes, billRes, ccRes] = await Promise.all([
+    client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
+    client.execute({
+      sql: `SELECT bc.id, bc.name, bc.monthly_target, bc.is_cc_default,
+                   bp.month, bp.amount as paid_amount, bp.is_paid, bp.is_cc
+            FROM budget_config bc
+            JOIN bill_payments bp ON bc.id = bp.bill_id
+            WHERE bp.month LIKE ? AND bp.is_paid = 1`,
+      args: [`${year}-%`],
+    }),
+    client.execute({ sql: `SELECT * FROM cc_charges WHERE month LIKE ?`, args: [`${year}-%`] }),
+  ]);
+
+  for (const r of sumRes.rows) {
+    const s = r as unknown as MonthlySummary;
+    summaries[s.month] = s;
+  }
+  for (const r of billRes.rows as unknown as any[]) {
+    if (!billsByMonth[r.month]) billsByMonth[r.month] = [];
+    billsByMonth[r.month].push({ ...r, actual_amount: Number(r.paid_amount ?? r.monthly_target ?? 0) });
+  }
+  for (const r of ccRes.rows as unknown as CCCharge[]) {
+    if (!ccByMonth[r.month]) ccByMonth[r.month] = [];
+    ccByMonth[r.month].push(r);
+  }
+} finally { client.close(); }
+
+function getOrEmpty(month: string): MonthlySummary {
+  return summaries[month] ?? { month, income_alex:0,income_maham:0,income_other:0,checking_before:0,checking_after:0,savings_before:0,savings_after:0,cc_budget:5000,notes:null };
+}
+
+function ccSpend(month: string): number {
+  const bills = billsByMonth[month] ?? [];
+  const ccs   = ccByMonth[month] ?? [];
+  const recurring = bills.filter((b:any) => b.is_cc).reduce((s:number,b:any)=>s+Number(b.actual_amount),0);
+  const variable  = ccs.reduce((s,c)=>s+c.amount,0);
+  return recurring + variable;
+}
+function checkingOut(month: string): number {
+  return (billsByMonth[month] ?? []).filter((b:any)=>!b.is_cc).reduce((s:number,b:any)=>s+Number(b.actual_amount),0);
+}
+function netForMonth(month: string): number {
+  const s = getOrEmpty(month);
+  return totalIncome(s) - checkingOut(month) - ccSpend(month);
+}
+---
+
+<Layout title={`${year} Budget — Year View`} wide={true}>
+  <div class="mb-6 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <a href={`/budget/year?year=${Number(year)-1}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">←</a>
+      <h1 class="text-xl font-semibold text-stone-800">{year} Overview</h1>
+      <a href={`/budget/year?year=${Number(year)+1}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">→</a>
+    </div>
+    <div class="flex gap-2">
+      <a href="/budget" class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">Monthly View</a>
+      <a href={`/api/budget/export?year=${year}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">Export XLSX</a>
+    </div>
+  </div>
+
+  <div class="overflow-x-auto rounded-xl border border-surface-border">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="border-b border-surface-border bg-surface-card">
+          <th class="px-3 py-3 text-left font-medium text-stone-400 w-36">Category</th>
+          {MONTH_NAMES.map((m, i) => (
+            <th class="px-2 py-3 text-right font-medium text-stone-400">
+              <a href={`/budget?month=${months[i]}`} class="hover:text-brand-green">{m}</a>
+            </th>
+          ))}
+          <th class="px-3 py-3 text-right font-medium text-stone-400">Total</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-surface-border bg-surface-card">
+        {/* Income rows */}
+        {[
+          { label: 'Alex Income',   key: 'income_alex' },
+          { label: 'Maham Income',  key: 'income_maham' },
+          { label: 'Other Income',  key: 'income_other' },
+        ].map(({ label, key }) => {
+          const values = months.map(m => Number(getOrEmpty(m)[key as keyof MonthlySummary] ?? 0));
+          const total  = values.reduce((a, b) => a + b, 0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">{label}</td>
+              {values.map((v, i) => (
+                <td class="px-2 py-2 text-right tabular-nums text-brand-green">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-brand-green">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })}
+
+        {/* Separator */}
+        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+
+        {/* Checking out */}
+        {(() => {
+          const values = months.map(m => checkingOut(m));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">Fixed Bills</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* CC spend */}
+        {(() => {
+          const values = months.map(m => ccSpend(m));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">CC Spend</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* CC Budget */}
+        {(() => {
+          const values = months.map(m => Number(getOrEmpty(m).cc_budget));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-400">CC Budget</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-400">{fmt(v)}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-400">{fmt(total)}</td>
+            </tr>
+          );
+        })()}
+
+        {/* Separator */}
+        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+
+        {/* Checking After */}
+        {(() => {
+          const values = months.map(m => Number(getOrEmpty(m).checking_after));
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">Checking (After)</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
+            </tr>
+          );
+        })()}
+
+        {/* Savings After */}
+        {(() => {
+          const values = months.map(m => Number(getOrEmpty(m).savings_after));
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">Savings (After)</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
+            </tr>
+          );
+        })()}
+
+        {/* Savings this month */}
+        {(() => {
+          const values = months.map(m => {
+            const s = getOrEmpty(m);
+            const before = Number(s.savings_before ?? 0);
+            const after  = Number(s.savings_after  ?? 0);
+            return (before || after) ? after - before : 0;
+          });
+          const total = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">Saved</td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">
+                  {v ? fmt(v) : <span class="text-stone-300">—</span>}
+                </td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* Net (pre-savings) */}
+        {(() => {
+          const values = months.map(m => netForMonth(m));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="border-t-2 border-surface-border hover:bg-surface-hover font-medium">
+              <td class="px-3 py-2 text-stone-600">Net (pre-savings)</td>
+              {values.map(v => (
+                <td class={`px-2 py-2 text-right tabular-nums ${v > 0 ? 'text-brand-green' : v < 0 ? 'text-brand-red' : 'text-stone-400'}`}>
+                  {v !== 0 ? fmt(v) : <span class="text-stone-300">—</span>}
+                </td>
+              ))}
+              <td class={`px-3 py-2 text-right tabular-nums ${total > 0 ? 'text-brand-green' : total < 0 ? 'text-brand-red' : 'text-stone-400'}`}>{fmt(total)}</td>
+            </tr>
+          );
+        })()}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="mt-3 text-xs text-stone-400">Click any month header to open the detail view. Net (pre-savings) = income − fixed bills − CC spend. Saved = savings after − savings before.</p>
+</Layout>
