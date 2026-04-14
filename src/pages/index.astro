@@ -1,0 +1,137 @@
+---
+import Layout from '../layouts/Layout.astro';
+import ImpactCalculator from '../components/ImpactCalculator';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import {
+  totalCash,
+  totalCreditDebt,
+  netCash,
+  avgMonthlyBurn,
+  monthlyIncome,
+  eoyProjection,
+  formatCurrency,
+  type AccountRow,
+  type TransactionRow,
+  type IncomeRow,
+} from '../lib/finance';
+
+// ── Auth guard ────────────────────────────────────────────────────────────────
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) {
+  return Astro.redirect('/login');
+}
+
+// ── Data fetching ─────────────────────────────────────────────────────────────
+const client = getClient(env);
+let accounts:     AccountRow[]     = [];
+let transactions: TransactionRow[] = [];
+let incomes:      IncomeRow[]      = [];
+
+try {
+  const [acctRes, txnRes, incomeRes] = await Promise.all([
+    client.execute('SELECT * FROM accounts WHERE is_active = 1'),
+    client.execute(`
+      SELECT * FROM transactions
+      WHERE is_hidden = 0
+        AND date >= date('now', '-90 days')
+      ORDER BY date DESC
+      LIMIT 500
+    `),
+    client.execute('SELECT * FROM income_sources WHERE is_active = 1'),
+  ]);
+
+  accounts     = acctRes.rows     as unknown as AccountRow[];
+  transactions = txnRes.rows      as unknown as TransactionRow[];
+  incomes      = incomeRes.rows   as unknown as IncomeRow[];
+} finally {
+  client.close();
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+const cash         = totalCash(accounts);
+const debt         = totalCreditDebt(accounts);
+const net          = netCash(accounts);
+const savings      = accounts.filter(a => a.type === 'savings').reduce((s, a) => s + (a.current_balance ?? 0), 0);
+const checking     = accounts.filter(a => a.type === 'checking').reduce((s, a) => s + (a.current_balance ?? 0), 0);
+const projection   = eoyProjection({ accounts, transactions, incomeSources: incomes });
+
+const today = new Date();
+const monthName = today.toLocaleString('en-US', { month: 'long' });
+---
+
+<Layout title="Dashboard">
+  <!-- ── Header ── -->
+  <div class="mb-6">
+    <h1 class="text-xl font-semibold text-stone-800">
+      {monthName} {today.getFullYear()}
+    </h1>
+    <p class="text-sm text-stone-400">Financial overview</p>
+  </div>
+
+  <!-- ── Current Position ── -->
+  <div class="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Checking</p>
+      <p class="mt-1 text-xl font-semibold tabular-nums text-brand-green">{formatCurrency(checking)}</p>
+    </div>
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Savings</p>
+      <p class="mt-1 text-xl font-semibold tabular-nums text-brand-green">{formatCurrency(savings)}</p>
+    </div>
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Credit Card Debt</p>
+      <p class={`mt-1 text-xl font-semibold tabular-nums ${debt > 0 ? 'text-brand-red' : 'text-stone-500'}`}>
+        {formatCurrency(debt)}
+      </p>
+    </div>
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Net Position</p>
+      <p class={`mt-1 text-xl font-semibold tabular-nums ${net >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+        {formatCurrency(net)}
+      </p>
+    </div>
+  </div>
+
+  <!-- ── EOY Projection ── -->
+  <div class="mb-6 rounded-xl border-2 border-brand-green/30 bg-surface-card p-5">
+    <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-stone-600">End of Year Projection</h2>
+    <div class="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-4">
+      <div>
+        <p class="text-xs text-stone-400">Current Total Cash</p>
+        <p class="mt-1 text-lg font-semibold tabular-nums text-stone-800">{formatCurrency(cash)}</p>
+      </div>
+      <div>
+        <p class="text-xs text-stone-400">Avg Monthly Net</p>
+        <p class={`mt-1 text-lg font-semibold tabular-nums ${projection.avgMonthlyNet >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+          {formatCurrency(projection.avgMonthlyNet, { sign: true, compact: true })}
+        </p>
+      </div>
+      <div>
+        <p class="text-xs text-stone-400">Months Remaining</p>
+        <p class="mt-1 text-lg font-semibold tabular-nums text-stone-800">{projection.monthsRemaining}</p>
+      </div>
+      <div>
+        <p class="text-xs text-stone-400">Projected EOY Balance</p>
+        <p class={`mt-1 text-lg font-semibold tabular-nums ${projection.projectedBalance >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+          {formatCurrency(projection.projectedBalance)}
+        </p>
+      </div>
+    </div>
+    <p class="text-xs text-stone-400">
+      Based on {formatCurrency(cash)} current cash + {formatCurrency(projection.avgMonthlyNet, { sign: true })} avg net/mo × {projection.monthsRemaining} months remaining.
+    </p>
+  </div>
+
+  <!-- ── Big Purchase Impact Calculator ── -->
+  <div class="rounded-xl border border-surface-border bg-surface-card p-5">
+    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-stone-600">Big Purchase Impact</h2>
+    <p class="mb-4 text-xs text-stone-400">See how a large purchase would affect your savings, checking, and year-end position.</p>
+    <ImpactCalculator
+      client:load
+      currentSavings={projection.currentSavings}
+      avgMonthlyNet={projection.avgMonthlyNet}
+      monthsRemaining={projection.monthsRemaining}
+    />
+  </div>
+</Layout>

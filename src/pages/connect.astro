@@ -1,0 +1,248 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import { currentMonth } from '../lib/budget';
+import PlaidLinkButton from '../components/PlaidLink';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) {
+  return Astro.redirect('/login');
+}
+
+const client = getClient(env);
+let items: { id: string; institution_name: string | null; last_synced: string | null }[] = [];
+let accounts: { id: string; name: string; type: string; current_balance: number; entity_id: string; plaid_item_id: string }[] = [];
+let ccSettings: { card: string; display_name: string; billing_end_day: number; payment_day: number; credit_limit: number | null }[] = [];
+let variableSpendRows: { card: string; amount: number }[] = [];
+
+const thisMonth = currentMonth();
+const todayDay  = new Date().getDate();
+
+try {
+  const [itemRes, acctRes, ccRes, varRes] = await Promise.all([
+    client.execute('SELECT id, institution_name, last_synced FROM plaid_items ORDER BY created_at DESC'),
+    client.execute('SELECT id, name, type, current_balance, entity_id, plaid_item_id FROM accounts WHERE is_active = 1 ORDER BY name'),
+    client.execute("SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card"),
+    client.execute({ sql: 'SELECT card, amount FROM cc_variable_spend WHERE month = ?', args: [thisMonth] }),
+  ]);
+  items             = itemRes.rows as unknown as typeof items;
+  accounts          = acctRes.rows as unknown as typeof accounts;
+  ccSettings        = ccRes.rows   as unknown as typeof ccSettings;
+  variableSpendRows = varRes.rows  as unknown as typeof variableSpendRows;
+} finally {
+  client.close();
+}
+
+// Map card key → variable spend amount and payment_day
+const varSpendMap  = new Map(variableSpendRows.map(r => [r.card, Number(r.amount)]));
+const ccSettingsMap = new Map(ccSettings.map(s => [s.card, s]));
+
+// Detect which card key an account belongs to (Apple, Prime)
+function cardKeyForAccount(name: string): string | null {
+  const n = name.toLowerCase();
+  if (n.includes('apple'))  return 'apple';
+  if (n.includes('prime') || n.includes('amazon')) return 'prime';
+  return null;
+}
+
+// Compute adjusted balance for Apple/Prime CCs:
+// - Before statement is paid (today <= payment_day): Plaid balance + variable spend
+// - After statement is paid (today > payment_day):   just variable spend
+function adjustedBalance(account: typeof accounts[0]): { balance: number; label: string } | null {
+  if (account.type !== 'credit') return null;
+  const cardKey = cardKeyForAccount(account.name);
+  if (!cardKey) return null;
+
+  const settings    = ccSettingsMap.get(cardKey);
+  const varSpend    = varSpendMap.get(cardKey) ?? 0;
+  const paymentDay  = settings?.payment_day ?? 0;
+  const statementPaid = paymentDay > 0 && todayDay > paymentDay;
+
+  if (statementPaid) {
+    return { balance: varSpend, label: 'variable spend only' };
+  } else {
+    return { balance: account.current_balance + varSpend, label: 'balance + variable spend' };
+  }
+}
+
+function fmt(n: number) {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
+---
+
+<Layout title="Connected Accounts">
+  <div class="mb-6">
+    <h1 class="text-xl font-semibold text-stone-800">Connected Accounts</h1>
+    <p class="text-sm text-stone-400">Manage your Plaid bank connections and sync status.</p>
+  </div>
+
+  <!-- ── Plaid connect button (React island) ── -->
+  <div class="mb-6 rounded-xl border border-surface-border bg-surface-card p-5">
+    <h2 class="mb-1 text-sm font-semibold text-stone-700">Add a Bank Account</h2>
+    <p class="mb-4 text-xs text-stone-400">Connect your Chase checking, savings, and credit card accounts via Plaid.</p>
+    <PlaidLinkButton client:load />
+  </div>
+
+  <!-- ── Connected institutions ── -->
+  {items.length > 0 && (
+    <div class="mb-6">
+      <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Connected Banks</h2>
+      <div class="space-y-2">
+        {items.map(item => (
+          <div class="flex items-center justify-between rounded-xl border border-surface-border bg-surface-card px-4 py-3">
+            <div>
+              <p class="text-sm font-medium text-stone-700">{item.institution_name ?? 'Unknown Bank'}</p>
+              <p class="text-xs text-stone-400">
+                Last synced: {item.last_synced ? new Date(item.last_synced).toLocaleString() : 'Never'}
+              </p>
+            </div>
+            <form action="/api/plaid/sync" method="POST">
+              <input type="hidden" name="item_id" value={item.id} />
+              <button
+                type="submit"
+                class="rounded-lg border border-surface-border px-3 py-1.5 text-xs text-stone-500 hover:border-brand-green hover:text-brand-green"
+              >Sync now</button>
+            </form>
+          </div>
+        ))}
+      </div>
+    </div>
+  )}
+
+  <!-- ── Accounts list ── -->
+  {accounts.length > 0 && (
+    <div>
+      <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Accounts</h2>
+      <div class="rounded-xl border border-surface-border bg-surface-card overflow-hidden">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-surface-border text-left">
+              <th class="px-4 py-3 text-xs font-medium text-stone-400">Account</th>
+              <th class="px-4 py-3 text-xs font-medium text-stone-400">Type</th>
+              <th class="px-4 py-3 text-xs font-medium text-stone-400">Entity</th>
+              <th class="px-4 py-3 text-xs font-medium text-stone-400 text-right">Balance</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-surface-border">
+            {accounts.map(a => (
+              <tr class="hover:bg-surface-hover">
+                <td class="px-4 py-3 font-medium text-stone-700">{a.name}</td>
+                <td class="px-4 py-3 text-stone-400 capitalize">{a.type}</td>
+                <td class="px-4 py-3">
+                  <select
+                    class="rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600"
+                    data-account-id={a.id}
+                    onchange="updateEntity(this)"
+                  >
+                    <option value="household" selected={a.entity_id === 'household'}>Household</option>
+                    <option value="kirby"     selected={a.entity_id === 'kirby'}>Kirby</option>
+                    <option value="kennedy"   selected={a.entity_id === 'kennedy'}>Kennedy</option>
+                  </select>
+                </td>
+                <td class="px-4 py-3 text-right">
+                  {(() => {
+                    const adj = adjustedBalance(a);
+                    if (adj) {
+                      return (
+                        <div>
+                          <span class="tabular-nums font-medium text-brand-red">{fmt(adj.balance)}</span>
+                          <div class="text-[10px] text-stone-400 mt-0.5">{adj.label}</div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <span class={`tabular-nums font-medium ${a.type === 'credit' ? 'text-brand-red' : 'text-brand-green'}`}>
+                        {fmt(a.current_balance)}
+                      </span>
+                    );
+                  })()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )}
+
+  {items.length === 0 && accounts.length === 0 && (
+    <div class="rounded-xl border border-dashed border-surface-border p-8 text-center mb-6">
+      <p class="text-stone-400">No accounts connected yet.</p>
+      <p class="mt-1 text-xs text-stone-400">Use the button above to connect your first bank account.</p>
+    </div>
+  )}
+
+  <!-- ── Credit Card Billing Settings ── -->
+  <div class="mt-6 rounded-xl border border-surface-border bg-surface-card p-5">
+    <h2 class="mb-1 text-sm font-semibold text-stone-700">Credit Card Billing Settings</h2>
+    <p class="mb-4 text-xs text-stone-400">Controls which payment month CC charges fall into on the budget page.</p>
+    <div class="space-y-3">
+      {ccSettings.map(s => (
+        <div class="flex flex-wrap items-center gap-4 rounded-lg border border-surface-border bg-surface px-4 py-3">
+          <span class="text-sm font-medium text-stone-700 w-36">{s.display_name}</span>
+
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-stone-400 whitespace-nowrap">Closes</label>
+            <input type="number" min="1" max="31" value={s.billing_end_day}
+              class="cc-billing-end w-14 rounded border border-surface-border bg-surface-hover px-2 py-1 text-sm tabular-nums text-stone-700 focus:border-brand-green focus:outline-none"
+              data-card={s.card} />
+            <span class="text-xs text-stone-400">th</span>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-stone-400 whitespace-nowrap">Due</label>
+            <input type="number" min="1" max="31" value={s.payment_day}
+              class="cc-payment-day w-14 rounded border border-surface-border bg-surface-hover px-2 py-1 text-sm tabular-nums text-stone-700 focus:border-brand-green focus:outline-none"
+              data-card={s.card} />
+            <span class="text-xs text-stone-400">th next mo</span>
+          </div>
+
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-stone-400 whitespace-nowrap">Limit</label>
+            <input type="number" min="0" step="100" value={s.credit_limit ?? ''} placeholder="—"
+              class="cc-credit-limit w-24 rounded border border-surface-border bg-surface-hover px-2 py-1 text-sm tabular-nums text-stone-700 focus:border-brand-green focus:outline-none"
+              data-card={s.card} />
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</Layout>
+
+<script>
+  async function saveCCSetting(card: string, field: string, value: number) {
+    await fetch('/api/budget/cc-settings', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ card, [field]: value }),
+    });
+  }
+
+  function bindCCInput(selector: string, field: string) {
+    document.querySelectorAll<HTMLInputElement>(selector).forEach(inp => {
+      inp.addEventListener('change', () => {
+        const v = parseFloat(inp.value);
+        if (!isNaN(v)) saveCCSetting(inp.dataset.card!, field, v);
+      });
+    });
+  }
+
+  bindCCInput('.cc-billing-end',   'billing_end_day');
+  bindCCInput('.cc-payment-day',   'payment_day');
+  bindCCInput('.cc-credit-limit',  'credit_limit');
+</script>
+
+<script>
+  async function updateEntity(select: HTMLSelectElement) {
+    const accountId = select.dataset.accountId;
+    const entityId  = select.value;
+    await fetch('/api/accounts/entity', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ accountId, entityId }),
+    });
+  }
+  // @ts-ignore
+  window.updateEntity = updateEntity;
+</script>

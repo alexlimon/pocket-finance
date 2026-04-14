@@ -1,0 +1,79 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { hasPassword } from '../lib/auth';
+
+const env = Astro.locals.runtime.env;
+
+// If a password already exists, this page is off-limits
+if (await hasPassword(env)) {
+  return Astro.redirect('/login');
+}
+
+const error = Astro.url.searchParams.get('error');
+---
+
+<Layout title="First-time Setup" showNav={false}>
+  <div class="flex min-h-[80vh] items-center justify-center">
+    <div class="w-full max-w-sm">
+      <div class="mb-8 text-center">
+        <span class="text-4xl text-brand-green">◈</span>
+        <h1 class="mt-3 text-2xl font-semibold text-stone-800">Welcome to Pocket Finance</h1>
+        <p class="mt-1 text-sm text-stone-400">Create a household password to get started</p>
+      </div>
+
+      <div class="rounded-xl border border-surface-border bg-surface-card p-6 shadow-xl">
+        {error === 'mismatch' && (
+          <div class="mb-4 rounded-lg bg-red-950/50 border border-red-900/40 px-4 py-3 text-sm text-red-400">
+            Passwords don't match. Try again.
+          </div>
+        )}
+
+        <form action="/api/auth/setup" method="POST" class="space-y-4">
+          <div>
+            <label for="password" class="block text-xs font-medium text-stone-500 mb-1.5">
+              Choose a password
+            </label>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              required
+              minlength="8"
+              autofocus
+              autocomplete="new-password"
+              class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-sm text-stone-800 placeholder-zinc-600 focus:border-brand-green focus:outline-none focus:ring-1 focus:ring-brand-green"
+              placeholder="At least 8 characters"
+            />
+          </div>
+
+          <div>
+            <label for="confirm" class="block text-xs font-medium text-stone-500 mb-1.5">
+              Confirm password
+            </label>
+            <input
+              id="confirm"
+              name="confirm"
+              type="password"
+              required
+              autocomplete="new-password"
+              class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-sm text-stone-800 placeholder-zinc-600 focus:border-brand-green focus:outline-none focus:ring-1 focus:ring-brand-green"
+              placeholder="Repeat password"
+            />
+          </div>
+
+          <button
+            type="submit"
+            class="w-full rounded-lg bg-brand-green px-4 py-2.5 text-sm font-semibold text-zinc-900 hover:opacity-90"
+          >
+            Create password &amp; continue
+          </button>
+        </form>
+      </div>
+
+      <p class="mt-4 text-center text-xs text-stone-400">
+        This password gates access to your family's financial data.
+        Share it only with trusted household members.
+      </p>
+    </div>
+  </div>
+</Layout>

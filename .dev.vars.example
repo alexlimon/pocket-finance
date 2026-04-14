@@ -1,0 +1,9 @@
+# Copy this to .dev.vars and fill in your values.
+# .dev.vars is git-ignored and read by Wrangler during local development.
+
+TURSO_DATABASE_URL=libsql://your-db-name-your-org.turso.io
+TURSO_AUTH_TOKEN=your-turso-auth-token
+
+PLAID_CLIENT_ID=your-plaid-client-id
+PLAID_SECRET=your-plaid-sandbox-secret
+PLAID_ENV=sandbox

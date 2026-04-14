@@ -1,0 +1,44 @@
+import type { APIContext } from 'astro';
+import { verifySession } from '../../../lib/auth';
+import { getClient, json } from '../../../lib/db';
+
+export async function POST(context: APIContext): Promise<Response> {
+  const env = context.locals.runtime.env;
+  if (!(await verifySession(context.request, env))) return json({ error: 'Unauthorized' }, 401);
+
+  let body: Record<string, unknown>;
+  try { body = await context.request.json() as Record<string, unknown>; }
+  catch { return json({ error: 'Invalid JSON' }, 400); }
+
+  const month = String(body.month ?? '').trim();
+  if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: 'Invalid month' }, 400);
+
+  const allowed = new Set([
+    'income_alex','income_maham','income_other',
+    'checking_before','checking_after','savings_before','savings_after',
+    'cc_budget','notes',
+  ]);
+
+  const sets: string[] = [];
+  const args: unknown[] = [];
+  for (const [k, v] of Object.entries(body)) {
+    if (k === 'month' || !allowed.has(k)) continue;
+    sets.push(`${k} = ?`);
+    args.push(v);
+  }
+  if (!sets.length) return json({ error: 'Nothing to update' }, 400);
+
+  const client = getClient(env);
+  try {
+    // Upsert: create the row if it doesn't exist yet
+    await client.execute({
+      sql:  `INSERT INTO monthly_summary (month) VALUES (?) ON CONFLICT(month) DO NOTHING`,
+      args: [month],
+    });
+    await client.execute({
+      sql:  `UPDATE monthly_summary SET ${sets.join(', ')} WHERE month = ?`,
+      args: [...args, month],
+    });
+    return json({ ok: true });
+  } finally { client.close(); }
+}
