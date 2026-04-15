@@ -2,55 +2,57 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
+import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
 import {
-  fmt, monthLabel, prevMonth, nextMonth, currentMonth, totalIncome,
-  ccSubIsInPaymentMonth, ccSubPaymentMonth,
-  type MonthlySummary, type BillRow, type CCCharge, type CashExpense,
-} from '../lib/budget';
+  resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
+  computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
+  type ResolvedBill, type BigPurchase,
+} from '../lib/budget-calc';
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
 
-const month   = Astro.url.searchParams.get('month') ?? currentMonth();
-const today   = new Date();
-const isNow   = month === currentMonth();
-const todayDay = today.getDate();
+const month    = Astro.url.searchParams.get('month') ?? currentMonth();
+const prev     = prevMonth(month);
+const next     = nextMonth(month);
+const label    = monthLabel(month);
+const isNow    = month === currentMonth();
+const todayDay = new Date().getDate();
 
 const client = getClient(env);
 
+// ── Data defaults (overwritten by DB fetch below) ────────────────────────────
 let summary: MonthlySummary = {
   month, income_alex:0, income_maham:0, income_other:0,
   checking_before:0, checking_after:0, savings_before:0, savings_after:0,
   cc_budget:5000, notes:null,
 };
-let bills: (BillRow & { effective_paid: boolean; is_auto: boolean })[] = [];
-let ccCharges: (CCCharge & { payment_month: string|null })[] = [];
-let cashExpenses: CashExpense[] = [];
-let ccSettings: { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
-let variableSpendRows: { card: string; amount: number }[] = [];
+let bills:            ResolvedBill[] = [];
+let nextBills:        ResolvedBill[] = [];
+let bigPurchases:     BigPurchase[]  = [];
+let cashExpenses:     CashExpense[]  = [];
+let ccSettings:       { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
+let variableSpendRows:{ card: string; amount: number }[] = [];
 let nextMonthCCBudget: number | null = null;
-let nextBills: (BillRow & { effective_paid: boolean; is_auto: boolean })[] = [];
+
+// ── Database fetches ─────────────────────────────────────────────────────────
+const BILLS_SELECT = `
+  SELECT bc.*,
+         bp.id as payment_id,
+         bp.amount as paid_amount,
+         COALESCE(bp.is_paid, -1) as explicit_paid,
+         COALESCE(bp.is_cc, bc.is_cc_default) as is_cc,
+         COALESCE(bp.is_skipped, 0) as is_skipped
+  FROM budget_config bc
+  LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?`;
+const BILLS_QUERY    = BILLS_SELECT + ` WHERE bc.is_recurring = 1 ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`;
+const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1 ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`;
 
 try {
-  const prev = prevMonth(month);
-  const next = nextMonth(month);
-  // Fetch previous month (balance propagation) and next month (CC spending budget)
-  const [sumRes, billRes, ccRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes] = await Promise.all([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes] = await Promise.all([
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
-    client.execute({
-      sql: `SELECT bc.*,
-                   bp.id as payment_id,
-                   bp.amount as paid_amount,
-                   COALESCE(bp.is_paid, -1) as explicit_paid,
-                   COALESCE(bp.is_cc, bc.is_cc_default) as is_cc,
-                   COALESCE(bp.is_skipped, 0) as is_skipped
-            FROM budget_config bc
-            LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?
-            WHERE bc.is_recurring = 1
-            ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`,
-      args: [month],
-    }),
-    // Big purchases only (variable spend is now in cc_variable_spend)
+    client.execute({ sql: BILLS_QUERY, args: [month] }),
+    // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
     client.execute({
       sql: `SELECT cc.*, cs.billing_end_day, cs.payment_day
             FROM cc_charges cc
@@ -61,200 +63,83 @@ try {
     }),
     client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month = ? ORDER BY date ASC', args: [month] }),
     client.execute("SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card"),
+    // Previous month — propagate balances forward when this month has no DB record yet
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [prev] }),
-    // Per-card variable spend for this month
-    client.execute({ sql: `SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card`, args: [month] }),
-    // Next month summary (for CC spending budget = next month's cc_budget)
+    client.execute({ sql: 'SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card', args: [month] }),
+    // Next month — its cc_budget is THIS month's CC spending budget (payment-month convention)
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] }),
-    // Next month's bills+payments — used for the "billed this month, paid next month" display
-    // (CC Recurring Subscriptions section reflects next month's payment cycle).
-    client.execute({
-      sql: `SELECT bc.*,
-                   bp.id as payment_id,
-                   bp.amount as paid_amount,
-                   COALESCE(bp.is_paid, -1) as explicit_paid,
-                   COALESCE(bp.is_cc, bc.is_cc_default) as is_cc,
-                   COALESCE(bp.is_skipped, 0) as is_skipped
-            FROM budget_config bc
-            LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?
-            WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1
-            ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`,
-      args: [next],
-    }),
+    // Next month CC bills — subs charged this cycle are tracked in next month's bill_payments
+    client.execute({ sql: CC_BILLS_QUERY, args: [next] }),
   ]);
 
+  // Resolve this month's summary, or propagate from the previous month if new
   if (sumRes.rows.length) {
     summary = sumRes.rows[0] as unknown as MonthlySummary;
   } else if (prevSumRes.rows.length) {
-    // No record for this month yet — propagate balances forward from previous month
-    const prev = prevSumRes.rows[0] as unknown as MonthlySummary;
+    const p = prevSumRes.rows[0] as unknown as MonthlySummary;
     summary = {
       ...summary,
-      checking_before: Number(prev.checking_after),
-      checking_after:  Number(prev.checking_after), // same until user updates
-      savings_before:  Number(prev.savings_after),
-      savings_after:   Number(prev.savings_after),
-      // Carry forward income as last known estimate
-      income_alex:  Number(prev.income_alex),
-      income_maham: Number(prev.income_maham),
-      income_other: Number(prev.income_other),
+      checking_before: Number(p.checking_after),
+      checking_after:  Number(p.checking_after),
+      savings_before:  Number(p.savings_after),
+      savings_after:   Number(p.savings_after),
+      income_alex:     Number(p.income_alex),
+      income_maham:    Number(p.income_maham),
+      income_other:    Number(p.income_other),
     };
   }
 
-  // Next month's cc_budget = this month's CC spending budget
   if (nextSumRes.rows.length) {
-    const ns = nextSumRes.rows[0] as unknown as MonthlySummary;
-    nextMonthCCBudget = Number(ns.cc_budget) || null;
+    nextMonthCCBudget = Number((nextSumRes.rows[0] as any).cc_budget) || null;
   }
 
-  ccSettings = settingsRes.rows as unknown as typeof ccSettings;
-
-  bills = (billRes.rows as unknown[]).map((r: any) => {
-    const hasExplicit   = Number(r.explicit_paid) !== -1;
-    const explicitPaid  = hasExplicit ? !!Number(r.explicit_paid) : false;
-    const isAuto = isNow && !hasExplicit && r.due_day !== null && todayDay >= Number(r.due_day);
-    const effectivePaid = hasExplicit ? explicitPaid : isAuto;
-    return {
-      ...r,
-      actual_amount:  effectivePaid ? Number(r.paid_amount ?? r.monthly_target ?? 0)
-                                    : Number(r.monthly_target ?? 0),
-      is_paid:        effectivePaid ? 1 : 0,
-      is_cc:          Number(r.is_cc),
-      effective_paid: effectivePaid,
-      is_auto:        isAuto,
-      is_skipped:     Number(r.is_skipped) === 1,
-    };
-  }) as typeof bills;
-
-  ccCharges        = ccRes.rows   as unknown as typeof ccCharges;   // big purchases only
-  cashExpenses     = cashRes.rows as unknown as CashExpense[];
-  variableSpendRows= varRes.rows  as unknown as typeof variableSpendRows;
-
-  // Map next-month bills (CC recurring only) with their own payment state
-  nextBills = (nextBillRes.rows as unknown[]).map((r: any) => {
-    const hasExplicit   = Number(r.explicit_paid) !== -1;
-    const explicitPaid  = hasExplicit ? !!Number(r.explicit_paid) : false;
-    const effectivePaid = hasExplicit ? explicitPaid : false; // no auto-check for future months
-    return {
-      ...r,
-      actual_amount:  effectivePaid ? Number(r.paid_amount ?? r.monthly_target ?? 0)
-                                    : Number(r.monthly_target ?? 0),
-      is_paid:        effectivePaid ? 1 : 0,
-      is_cc:          Number(r.is_cc),
-      effective_paid: effectivePaid,
-      is_auto:        false,
-      is_skipped:     Number(r.is_skipped) === 1,
-    };
-  }) as typeof nextBills;
+  ccSettings        = settingsRes.rows     as unknown as typeof ccSettings;
+  bigPurchases      = bigPurchasesRes.rows as unknown as BigPurchase[];
+  cashExpenses      = cashRes.rows         as unknown as CashExpense[];
+  variableSpendRows = varRes.rows          as unknown as typeof variableSpendRows;
+  bills             = resolveBillStatus(billRes.rows as any[], isNow, todayDay);
+  nextBills         = resolveBillStatus(nextBillRes.rows as any[], isNow, todayDay, /* allowAuto */ false);
 } finally { client.close(); }
 
-// Build a map card→amount for variable spend
-const variableSpendMap = new Map(variableSpendRows.map(r => [r.card, Number(r.amount)]));
-
-// ── Derived groupings ────────────────────────────────────────────────────────
-// Filter out the CC payment bill from checking bills (we compute it from prior month budget)
-const ccPaymentPattern = /cc\s*payment|credit\s*card\s*payment/i;
-const checkingBills = bills.filter(b => !b.is_cc_default && !ccPaymentPattern.test(b.name) && !b.is_skipped);
-const ccBills       = bills.filter(b => !!b.is_cc_default && !b.is_skipped);
-const bigPurchases  = ccCharges; // all cc_charges are now big purchases only
-
-// Big purchases grouped by payment_month
-const bigByPayMonth = new Map<string, typeof ccCharges>();
-for (const c of bigPurchases) {
-  const key = c.payment_month ?? 'unknown';
-  if (!bigByPayMonth.has(key)) bigByPayMonth.set(key, []);
-  bigByPayMonth.get(key)!.push(c);
-}
-const bigPayGroups = [...bigByPayMonth.entries()].sort(([a],[b]) => {
-  if (a==='unknown') return 1; if (b==='unknown') return -1; return a.localeCompare(b);
-});
-
-const settingsMap = new Map(ccSettings.map(s => [s.card, s]));
-
-// Billing end day for the default CC (Sapphire). Drives the cycle filter below.
+// ── Derived data ─────────────────────────────────────────────────────────────
+const settingsMap          = new Map(ccSettings.map(s => [s.card, s]));
 const defaultBillingEndDay = settingsMap.get('sapphire')?.billing_end_day ?? 25;
 
-// ── Filter to only the CC recurring subs that belong to THIS month's CC payment ──
-// For payment month M, a sub is in scope when:
-//   due_day <= billingEndDay  →  billed in prevMonth(M), paid in M
-//   due_day >  billingEndDay  →  billed in prevPrevMonth(M), paid in M
-// Subs without a due_day are always included (manual control).
-// This is the single source of truth — all calculations below use this array.
-const ccBillsForPayment = ccBills.filter(b =>
-  ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, defaultBillingEndDay, month)
-);
+const { checkingBills, ccBills } = categorizeBills(bills);
+const bigPayGroups                = groupBigPurchasesByPayMonth(bigPurchases);
 
-// CC recurring for the CURRENT PAYMENT (last billing cycle, paid this month) — used for ccPaymentAmount only
-const estimatedCCPaymentRecurring = ccBillsForPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
-const actualCCPaymentRecurring    = ccBillsForPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
+const ccPayment = computeCCPayment({
+  ccBills,
+  billingEndDay:    defaultBillingEndDay,
+  paymentMonth:     month,
+  ccVariableBudget: Number(summary.cc_budget),
+});
 
-// CC spending budget for this month = next month's cc_budget
-// (spreadsheet payment-month convention: cc_budget[M] = what you pay in M = prior month's variable spend)
-const ccSpendBudget = nextMonthCCBudget ?? Number(summary.cc_budget);
+const ccTracker = computeCCSpendingTracker({
+  nextBills,
+  billingEndDay:     defaultBillingEndDay,
+  nextMonth:         next,
+  variableSpendRows,
+  bigPurchases,
+  nextMonthCCBudget,
+  currentCCBudget:   Number(summary.cc_budget),
+});
 
-// CC remaining = spending budget - variable spend (non-recurring) - big purchases
-// cc_variable_spend includes recurring charges billed THIS month (paid NEXT month).
-// Strip out NEXT month's estimated recurring (same billing cycle as the variable spend),
-// NOT the current payment's recurring which belongs to a different cycle.
-const ccVariable     = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
-const ccBig          = bigPurchases.reduce((s, c) => s + c.amount, 0);
-// Pull the display set from NEXT month's bill_payments rows — these subs are billed
-// in the current cycle and will be paid next month, so their paid-state/actuals live there.
-const ccBillsNextPayment = nextBills.filter(b =>
-  !b.is_skipped &&
-  ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, defaultBillingEndDay, nextMonth(month))
-);
-// CC recurring for THIS MONTH'S BILLING CYCLE — what's being charged now, paid next month.
-// These are displayed in the CC Recurring Subscriptions section (aligned with the spending budget).
-const estimatedCCRecurring = ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
-const actualCCRecurring    = ccBillsNextPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
-const allCCRecurringChecked = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
-const ccDisplayMode: 'estimated' | 'actual' = allCCRecurringChecked ? 'actual' : 'estimated';
-const ccRecurringInVariable = ccDisplayMode === 'actual' ? actualCCRecurring : estimatedCCRecurring;
-const ccVariableOnly = Math.max(0, ccVariable - ccRecurringInVariable); // strip correct cycle's recurring
-const ccUsed         = ccVariableOnly + ccBig;
-const ccRemaining    = ccSpendBudget - ccUsed;
-const ccUsedPct      = Math.min((ccUsed / ccSpendBudget) * 100, 100);
-const incomeTotal = totalIncome(summary);
-const otherCashExpenses = cashExpenses.filter(e => e.type === 'expense');
-const otherCashIncomes  = cashExpenses.filter(e => e.type === 'income');
-const otherCashExpenseTotal = otherCashExpenses.reduce((s, e) => s + e.amount, 0);
-const otherCashIncomeTotal  = otherCashIncomes.reduce((s, e) => s + e.amount, 0);
-const otherCashNet = otherCashIncomeTotal - otherCashExpenseTotal;
+const cashFlow = computeCashFlow({
+  summary,
+  checkingBills,
+  ccPaymentAmount: ccPayment.ccPaymentAmount,
+  cashExpenses,
+});
 
-// Total fixed checking bills (excluding the CC payment bill we filter out)
-const totalFixedChecking = checkingBills.reduce((s, b) => s + b.actual_amount, 0);
+const balances = computeBalances(summary, cashFlow.netAmount);
 
-// CC payment from checking = this month's cc_budget (variable) + this month's cc_recurring_budget
-// cc_budget[M] = variable component of M's CC payment; cc_recurring_budget[M] = recurring component
-// CC payment this month uses last billing cycle's recurring (ccBillsForPayment).
-// Default: estimated unless all of those are checked off.
-const allCCPaymentChecked = ccBillsForPayment.length > 0 && ccBillsForPayment.every(b => b.effective_paid);
-const ccRecurringMode: 'estimated' | 'actual' = allCCPaymentChecked ? 'actual' : 'estimated';
-const ccRecurringBudget = ccRecurringMode === 'actual' ? actualCCPaymentRecurring : estimatedCCPaymentRecurring;
-const ccPaymentAmount = Number(summary.cc_budget) + ccRecurringBudget;
-// NET = Income + Other Cash Income - Fixed Checking Bills - CC Payment - Other Cash Expenses
-const netAmount = incomeTotal + otherCashIncomeTotal - totalFixedChecking - ccPaymentAmount - otherCashExpenseTotal;
-
-// Savings: user edits "to savings" amount, end balances are computed
-const checkingStart     = Number(summary.checking_before);
-const savingsStart      = Number(summary.savings_before);
-const savingsAllocation = Number(summary.savings_after) - savingsStart; // derived from stored end - start
-const checkingEnd       = checkingStart + netAmount - savingsAllocation;
-const savingsEnd        = savingsStart + savingsAllocation;
-
-// Returns the billing month for a sub in ccBillsNextPayment (subs billed THIS month, paid next month).
-//   due_day <= billingEndDay  →  charged this month (within current billing cycle)
-//   due_day >  billingEndDay  →  charged last month (after last month's cutoff → rolls into this cycle)
-function subBillingMonth(bill: typeof bills[0]): string | null {
-  if (!bill.due_day) return null;
-  const dueDay = Number(bill.due_day);
-  return dueDay <= defaultBillingEndDay ? month : prevMonth(month);
-}
-
-const label = monthLabel(month);
-const prev  = prevMonth(month);
-const next  = nextMonth(month);
+// Destructure for template use
+const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
+const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
+        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
+const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
+const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 ---
 
 <Layout title={label}>
@@ -522,7 +407,7 @@ const next  = nextMonth(month);
 
   <div class="mt-3 flex justify-between border-t border-surface-border pt-2">
     <span class="text-xs text-stone-400">Total variable CC</span>
-    <span class="tabular-nums text-sm font-medium text-stone-600" id="cc-variable-val">{fmt(ccVariable)}</span>
+    <span class="tabular-nums text-sm font-medium text-stone-600" id="cc-variable-val">{fmt(ccVariableTotal)}</span>
   </div>
 </div>
 
@@ -587,7 +472,7 @@ const next  = nextMonth(month);
 
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1" id="cc-bills">
     {ccBillsNextPayment.map(b => {
-      const bm = subBillingMonth(b);
+      const bm = subBillingMonth(b, defaultBillingEndDay, month);
       const billingLabel = bm ? `${new Date(bm+'-01').toLocaleString('en-US',{month:'short'})}` : '';
       return (
         <div class="flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover" data-bill-id={b.id}>
