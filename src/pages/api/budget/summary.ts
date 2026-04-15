@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { nextMonth } from '../../../lib/budget';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -39,6 +40,20 @@ export async function POST(context: APIContext): Promise<Response> {
       sql:  `UPDATE monthly_summary SET ${sets.join(', ')} WHERE month = ?`,
       args: [...args, month],
     });
+
+    // When checking_after is saved, propagate it as the next month's checking_before
+    if ('checking_after' in body) {
+      const next = nextMonth(month);
+      await client.execute({
+        sql:  `INSERT INTO monthly_summary (month) VALUES (?) ON CONFLICT(month) DO NOTHING`,
+        args: [next],
+      });
+      await client.execute({
+        sql:  `UPDATE monthly_summary SET checking_before = ? WHERE month = ?`,
+        args: [Number(body.checking_after), next],
+      });
+    }
+
     return json({ ok: true });
   } finally { client.close(); }
 }

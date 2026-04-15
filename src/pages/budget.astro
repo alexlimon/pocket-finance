@@ -772,7 +772,12 @@ function recalcCashFlow(recurringVal: number) {
   if (netEl2) netEl2.className = netEl2.className.replace(/text-brand-\w+/g, '') + (net >= 0 ? ' text-brand-green' : ' text-brand-red');
   const checkEndEl = document.getElementById('checking-end-val');
   if (checkEndEl) checkEndEl.className = checkEndEl.className.replace(/text-brand-red|text-stone-800/g, '') + (checkEnd >= 0 ? ' text-stone-800' : ' text-brand-red');
+  
+  // Save checking_after to database
+  api('/api/budget/summary', 'POST', { month: MONTH, checking_after: checkEnd }).catch(() => {});
 }
+
+
 
 document.getElementById('recurring-mode-toggle')?.addEventListener('click', () => {
   const sec  = document.getElementById('cc-recurring-section') as HTMLElement;
@@ -861,6 +866,7 @@ document.querySelectorAll<HTMLElement>('.var-spend-amount').forEach(el => {
           body: JSON.stringify({month, card, amount: v}),
         }).catch(()=>{});
         recomputeCC();
+        
       }
     }
     inp.addEventListener('blur', save);
@@ -882,7 +888,11 @@ function bindInlineEdit(el: HTMLElement) {
       const v = parseFloat(inp.value);
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
-      if (!isNaN(v)) { await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{}); recomputeCC(); }
+      if (!isNaN(v)) { 
+        await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{}); 
+        recomputeCC(); 
+         
+      }
     }
     inp.addEventListener('blur', save);
     inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
@@ -945,7 +955,7 @@ document.querySelectorAll<HTMLElement>('.editable-bill-amount').forEach(el => {
       const v = parseFloat(inp.value);
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
-      if (!isNaN(v)) { await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{}); recomputeCC(); }
+      if (!isNaN(v)) { await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{}); recomputeCC();  }
     }
     inp.addEventListener('blur',save);
     inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
@@ -967,6 +977,7 @@ document.querySelectorAll<HTMLInputElement>('.bill-toggle').forEach(cb => {
     try { await api('/api/budget/bill-payment','POST',{month:cb.dataset.month ?? MONTH,bill_id:billId,amount:amt,is_paid:isPaid,is_cc:isCC}); }
     catch { cb.checked = !isPaid; }
     recomputeCC();
+    
   });
 });
 
@@ -1148,8 +1159,9 @@ document.querySelectorAll<HTMLButtonElement>('.delete-cash').forEach(btn => {
   btn.addEventListener('click', async () => {
     const id=btn.dataset.id!, row=btn.closest('[data-cash-id]') as HTMLElement;
     await fetch(`/api/budget/cash-expense?id=${id}`,{method:'DELETE'});
-    row.remove();
-  });
+row.remove();
+      
+    });
 });
 
 // ── Add cash expense (income or expense) ──────────────────────────────────────
@@ -1181,7 +1193,19 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
       list.appendChild(row);
       row.querySelector('.delete-cash')?.addEventListener('click',async()=>{await fetch(`/api/budget/cash-expense?id=${res.id}`,{method:'DELETE'});row.remove();});
       form.reset();
+      
     } catch(err){alert(String(err));}
   });
 });
+
+// Save computed checking_end to DB on page load so next month can use it as checking_before
+(function() {
+  const checkEndEl = document.getElementById('checking-end-val');
+  if (checkEndEl) {
+    const checkEnd = parseFloat(checkEndEl.textContent!.replace(/[$,]/g,'') ?? '0');
+    if (!isNaN(checkEnd)) {
+      api('/api/budget/summary', 'POST', { month: MONTH, checking_after: checkEnd }).catch(() => {});
+    }
+  }
+})();
 </script>
