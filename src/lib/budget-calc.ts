@@ -153,13 +153,14 @@ export function computeCCPayment(params: {
  * We use those rows so paid-state reflects what's actually been checked off for next month's payment.
  */
 export function computeCCSpendingTracker(params: {
-  nextBills:         ResolvedBill[];
-  billingEndDay:     number;
-  nextMonth:         string;
-  variableSpendRows: { card: string; amount: number }[];
-  bigPurchases:      BigPurchase[];
-  nextMonthCCBudget: number | null;
-  currentCCBudget:   number;
+  nextBills:          ResolvedBill[];
+  billingEndDay:      number;
+  nextMonth:          string;
+  variableSpendRows:  { card: string; amount: number }[];
+  bigPurchases:       BigPurchase[];
+  nextMonthCCBudget:  number | null;
+  currentCCBudget:    number;
+  savedDisplayMode?:  'estimated' | 'actual' | null;
 }): {
   ccBillsNextPayment:  ResolvedBill[];
   estimatedCCRecurring: number;
@@ -190,7 +191,7 @@ export function computeCCSpendingTracker(params: {
   const estimatedCCRecurring   = ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
   const actualCCRecurring      = ccBillsNextPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
   const allCCRecurringChecked  = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
-  const ccDisplayMode          = allCCRecurringChecked ? 'actual' : 'estimated' as const;
+  const ccDisplayMode          = (params.savedDisplayMode ?? (allCCRecurringChecked ? 'actual' : 'estimated')) as 'estimated' | 'actual';
   const ccRecurringInVariable  = ccDisplayMode === 'actual' ? actualCCRecurring : estimatedCCRecurring;
 
   // Per-card variable spend map (for display)

@@ -48,8 +48,10 @@ const BILLS_SELECT = `
 const BILLS_QUERY    = BILLS_SELECT + ` WHERE bc.is_recurring = 1 ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`;
 const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1 ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`;
 
+let savedRecurringMode: 'estimated' | 'actual' | null = null;
+
 try {
-  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes] = await Promise.all([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes] = await Promise.all([
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
     client.execute({ sql: BILLS_QUERY, args: [month] }),
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -70,7 +72,14 @@ try {
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] }),
     // Next month CC bills — subs charged this cycle are tracked in next month's bill_payments
     client.execute({ sql: CC_BILLS_QUERY, args: [next] }),
+    // Saved est/actual toggle for this month
+    client.execute({ sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] }),
   ]);
+
+  if (recurringModeRes.rows.length) {
+    const v = String((recurringModeRes.rows[0] as any).value);
+    if (v === 'actual' || v === 'estimated') savedRecurringMode = v;
+  }
 
   // Resolve this month's summary, or propagate from the previous month if new
   if (sumRes.rows.length) {
@@ -123,6 +132,7 @@ const ccTracker = computeCCSpendingTracker({
   bigPurchases,
   nextMonthCCBudget,
   currentCCBudget:   Number(summary.cc_budget),
+  savedDisplayMode:  savedRecurringMode,
 });
 
 const cashFlow = computeCashFlow({
@@ -359,7 +369,7 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
       <option value="expense">Expense</option>
       <option value="income">Income</option>
     </select>
-    <input name="date" type="date" class="w-32 rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none flex-shrink-0" />
+    <input name="date" type="date" value={`${month}-${String(todayDay).padStart(2,'0')}`} class="w-32 rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none flex-shrink-0" />
     <input name="description" placeholder="Description" required
       class="flex-1 rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-sm text-stone-800 placeholder-stone-400 focus:border-brand-green focus:outline-none min-w-0" />
     <select name="entity_id" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:outline-none flex-shrink-0">
@@ -475,7 +485,7 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
       const bm = subBillingMonth(b, defaultBillingEndDay, month);
       const billingLabel = bm ? `${new Date(bm+'-01').toLocaleString('en-US',{month:'short'})}` : '';
       return (
-        <div class="flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover" data-bill-id={b.id}>
+        <div class="group flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover" data-bill-id={b.id}>
           <div class="flex items-center gap-1.5 min-w-0">
             <input type="checkbox" checked={b.effective_paid}
               class="bill-toggle h-3.5 w-3.5 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
@@ -492,6 +502,8 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
           <div class="flex items-center gap-1 flex-shrink-0">
             <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
               data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
+            <button class="cc-sub-skip opacity-0 group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
+              data-bill-id={b.id} data-month={next} title="Skip this sub for this month">✕</button>
           </div>
         </div>
       );
@@ -690,6 +702,53 @@ document.getElementById('recurring-mode-toggle')?.addEventListener('click', () =
   if (budgetEl) {
     budgetEl.dataset.recurring = String(val);
     recomputeCC();
+  }
+
+  // Persist the chosen mode so it survives page reload
+  api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${MONTH}`, value: mode }).catch(() => {});
+});
+
+// ── CC recurring sub skip ─────────────────────────────────────────────────────
+document.getElementById('cc-bills')?.addEventListener('click', async e => {
+  const btn = (e.target as HTMLElement).closest<HTMLElement>('.cc-sub-skip');
+  if (!btn) return;
+  const billId   = btn.dataset.billId!;
+  const billMonth = btn.dataset.month!;
+  const row      = btn.closest<HTMLElement>('[data-bill-id]');
+  if (!row) return;
+
+  try {
+    await api('/api/budget/bill-skip', 'POST', { month: billMonth, bill_id: billId, skip: true });
+    row.remove();
+
+    // Recompute estimated/actual totals from remaining rows
+    const sec = document.getElementById('cc-recurring-section') as HTMLElement;
+    let newEst = 0; let newAct = 0;
+    document.querySelectorAll<HTMLElement>('#cc-bills [data-bill-id]').forEach(r => {
+      const amtEl = r.querySelector<HTMLElement>('.editable-bill-amount');
+      const amt   = parseFloat(amtEl?.textContent?.replace(/[$,]/g,'') ?? '0');
+      const chk   = r.querySelector<HTMLInputElement>('.bill-toggle');
+      // estimated uses monthly_target — we only have actual_amount in the DOM, use it as proxy
+      newEst += amt;
+      if (chk?.checked) newAct += amt;
+    });
+    sec.dataset.estimated = String(newEst);
+    sec.dataset.actual    = String(newAct);
+
+    const mode    = sec.dataset.mode as 'estimated' | 'actual';
+    const recurVal = mode === 'actual' ? newAct : newEst;
+    sec.dataset.paymentRecurring = String(recurVal);
+
+    // Update toggle labels
+    const estLabel = document.getElementById('mode-label-est');
+    const actLabel = document.getElementById('mode-label-act');
+    if (estLabel) estLabel.textContent = usd(newEst);
+    if (actLabel) actLabel.textContent = usd(newAct);
+
+    // Cascade to cash flow
+    recalcCashFlow(recurVal);
+  } catch (err) {
+    alert('Could not skip subscription.');
   }
 });
 
