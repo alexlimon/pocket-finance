@@ -40,6 +40,7 @@ export interface BillRow extends BillConfig {
   actual_amount:  number;   // payment amount if paid, else monthly_target
   is_paid:        number;
   is_cc:          number;
+  is_skipped:     boolean;
 }
 
 export interface CCCharge {
@@ -61,44 +62,6 @@ export interface CashExpense {
   amount:      number;
   type:        'expense' | 'income';
   entity_id:   string;
-}
-
-// ── Calculations ──────────────────────────────────────────────────────────────
-
-/** CC remaining budget for the month.
- *
- *  Logic:
- *   - Variable CC charges (non-big-purchase) count against budget
- *   - Big purchases ALSO count against budget
- *   - CC recurring subscriptions do NOT count (they are fixed/known costs shown separately)
- *
- *  This means Jan–Mar naturally show $0 remaining because
- *  variable CC was seeded to exactly match the cc_budget.
- */
-export function calcCCRemaining(
-  ccBudget:  number,
-  _bills:    BillRow[],   // kept for signature compatibility
-  ccCharges: CCCharge[],
-): number {
-  const used = ccCharges.reduce((s, c) => s + c.amount, 0);
-  return ccBudget - used;
-}
-
-/** Core CC balance = variable spend + big purchases (no recurring). */
-export function calcCCCoreBalance(_bills: BillRow[], ccCharges: CCCharge[]): number {
-  return ccCharges.reduce((s, c) => s + c.amount, 0);
-}
-
-export function calcCCBigPurchases(ccCharges: CCCharge[]): number {
-  return ccCharges
-    .filter(c => c.is_big_purchase)
-    .reduce((s, c) => s + c.amount, 0);
-}
-
-export function calcCheckingExpenses(bills: BillRow[]): number {
-  return bills
-    .filter(b => b.is_paid && !b.is_cc)
-    .reduce((s, b) => s + b.actual_amount, 0);
 }
 
 export function totalIncome(s: MonthlySummary): number {
