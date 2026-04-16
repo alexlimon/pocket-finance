@@ -89,12 +89,17 @@ const varByM   = byMonth(varSpend);
 const bigByM   = byMonth(bigCharges as unknown as { month: string }[]) as unknown as Record<string, CCCharge[]>;
 const cashByM  = byMonth(cashRows);
 
-// ── Resolve bills for any month (mirrors year.astro logic) ───────────────────
-// For a given month, returns the amount of every applicable recurring bill,
-// using bill_payments actual where recorded, else budget_config.monthly_target.
+// ── Resolve bills for any month (mirrors year.astro + budget-calc.ts logic) ──
+// Returns the amount of every applicable recurring bill, using bill_payments
+// actuals where recorded, else budget_config.monthly_target.
+// Excludes the "CC Payment" meta-bill — that's computed separately from
+// cc_budget + cc recurring to avoid double-counting.
+const CC_PAYMENT_RE = /cc\s*payment|credit\s*card\s*payment/i;
+
 function resolvedBillsForMonth(m: string): { amount: number; isCc: boolean }[] {
   return billConfigs
     .filter(bc => {
+      if (CC_PAYMENT_RE.test(bc.name)) return false;  // computed separately
       if (bc.start_month && m < bc.start_month) return false;
       if (bc.end_month   && m > bc.end_month)   return false;
       return (bc.monthly_target ?? 0) > 0;
