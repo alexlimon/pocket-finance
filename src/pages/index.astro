@@ -6,9 +6,9 @@ import { getClient } from '../lib/db';
 import {
   aggregateMonth, safeToSpend, baselineRatio, burnLine, buildSankey,
   fmtCurrency, fmtPct,
-  type BillAggRow, type VariableSpendRow, type MonthAggregate,
+  type BillAggRow, type VariableSpendRow, type MonthAggregate, type MonthBaseline,
 } from '../lib/insights';
-import { currentMonth, prevMonth, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
+import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const env = Astro.locals.runtime.env;
@@ -25,41 +25,56 @@ const startMonth = months[0];
 
 // ── Fetch ────────────────────────────────────────────────────────────────────
 const client = getClient(env);
+const [curYear] = thisMonth.split('-').map(Number);
+const yearEnd = `${curYear}-12`;
+
+type BillConfig = { id: string; name: string; monthly_target: number | null; is_cc_default: number; start_month: string | null; end_month: string | null };
+type BillPayRow = { month: string; bill_id: string; amount: number; is_paid: number; is_skipped: number; is_cc_default: number; monthly_target: number | null };
+
 let summaries: MonthlySummary[]   = [];
-let billRows: (BillAggRow & { bill_id: string })[] = [];
+let billPayRows: BillPayRow[]     = [];
+let billConfigs: BillConfig[]     = [];
 let varSpend: VariableSpendRow[]  = [];
 let bigCharges: CCCharge[]        = [];
 let cashRows: CashExpense[]       = [];
-let projRows: Array<{ id: string; monthly_target: number; is_cc_default: number }> = [];
 let reserveAccounts: Array<{ type: string; current_balance: number }> = [];
 
 try {
-  const [sumRes, billRes, varRes, ccRes, cashRes, projRes, acctRes] = await Promise.all([
+  const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes, acctRes] = await Promise.all([
+    // All monthly_summary rows from 12mo ago through end of year
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month >= ? ORDER BY month', args: [startMonth] }),
+    // bill_payments joined with budget_config for lookup
     client.execute({
-      sql: `SELECT bp.month, bp.bill_id, bc.monthly_target, bp.amount as paid_amount,
-                   bp.is_paid, bc.is_cc_default, bp.is_skipped
+      sql: `SELECT bp.month, bp.bill_id, bp.amount, bp.is_paid, COALESCE(bp.is_skipped, 0) as is_skipped,
+                   bc.is_cc_default, bc.monthly_target
             FROM bill_payments bp
             JOIN budget_config bc ON bc.id = bp.bill_id
             WHERE bp.month >= ?`,
       args: [startMonth],
     }),
+    // Full budget_config for projecting bills into months without payment records
+    client.execute('SELECT id, name, monthly_target, is_cc_default, start_month, end_month FROM budget_config WHERE is_recurring = 1'),
     client.execute({ sql: 'SELECT month, card, amount FROM cc_variable_spend WHERE month >= ?', args: [startMonth] }),
     client.execute({ sql: 'SELECT * FROM cc_charges WHERE month >= ? AND is_big_purchase = 1', args: [startMonth] }),
     client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month >= ?', args: [startMonth] }),
-    client.execute('SELECT id, monthly_target, is_cc_default FROM budget_config WHERE is_recurring = 1'),
     client.execute("SELECT type, current_balance FROM accounts WHERE is_active = 1 AND type IN ('savings','investment')").catch(() => ({ rows: [] })),
   ]);
 
-  summaries       = sumRes.rows   as unknown as MonthlySummary[];
-  billRows        = billRes.rows  as unknown as (BillAggRow & { bill_id: string })[];
-  varSpend        = varRes.rows   as unknown as VariableSpendRow[];
-  bigCharges      = ccRes.rows    as unknown as CCCharge[];
-  cashRows        = cashRes.rows  as unknown as CashExpense[];
-  projRows        = projRes.rows  as unknown as typeof projRows;
-  reserveAccounts = acctRes.rows  as unknown as typeof reserveAccounts;
+  summaries       = sumRes.rows     as unknown as MonthlySummary[];
+  billPayRows     = billPayRes.rows as unknown as BillPayRow[];
+  billConfigs     = configRes.rows  as unknown as BillConfig[];
+  varSpend        = varRes.rows     as unknown as VariableSpendRow[];
+  bigCharges      = ccRes.rows      as unknown as CCCharge[];
+  cashRows        = cashRes.rows    as unknown as CashExpense[];
+  reserveAccounts = acctRes.rows    as unknown as typeof reserveAccounts;
 } finally {
   client.close();
+}
+
+// ── Bill payment lookup: "month|bill_id" → { amount, is_skipped } ────────────
+const billPayMap = new Map<string, { amount: number; is_skipped: boolean }>();
+for (const r of billPayRows) {
+  billPayMap.set(`${r.month}|${r.bill_id}`, { amount: Number(r.amount), is_skipped: !!r.is_skipped });
 }
 
 // ── Group by month ───────────────────────────────────────────────────────────
@@ -70,33 +85,45 @@ function byMonth<T extends { month: string }>(rows: T[]): Record<string, T[]> {
 }
 
 const sumMap   = new Map(summaries.map(s => [s.month, s]));
-const billsByM = byMonth(billRows);
 const varByM   = byMonth(varSpend);
 const bigByM   = byMonth(bigCharges as unknown as { month: string }[]) as unknown as Record<string, CCCharge[]>;
 const cashByM  = byMonth(cashRows);
 
-// Project unpaid recurring bills for the current month so Safe-to-Spend reflects
-// commitments, not just recorded payments.
-const currentBills: BillAggRow[] = [...(billsByM[thisMonth] ?? [])];
-const recordedIds = new Set((billsByM[thisMonth] ?? []).map(b => (b as any).bill_id));
-for (const p of projRows) {
-  if (!recordedIds.has(p.id) && (p.monthly_target ?? 0) > 0) {
-    currentBills.push({
-      month:          thisMonth,
-      monthly_target: p.monthly_target,
-      paid_amount:    null,
-      is_paid:        0,
-      is_cc_default:  p.is_cc_default,
-      is_skipped:     0,
-    });
-  }
+// ── Resolve bills for any month (mirrors year.astro logic) ───────────────────
+// For a given month, returns the amount of every applicable recurring bill,
+// using bill_payments actual where recorded, else budget_config.monthly_target.
+function resolvedBillsForMonth(m: string): { amount: number; isCc: boolean }[] {
+  return billConfigs
+    .filter(bc => {
+      if (bc.start_month && m < bc.start_month) return false;
+      if (bc.end_month   && m > bc.end_month)   return false;
+      return (bc.monthly_target ?? 0) > 0;
+    })
+    .map(bc => {
+      const pay = billPayMap.get(`${m}|${bc.id}`);
+      if (pay?.is_skipped) return null;
+      return { amount: pay ? pay.amount : Number(bc.monthly_target ?? 0), isCc: !!bc.is_cc_default };
+    })
+    .filter((b): b is NonNullable<typeof b> => b !== null);
 }
 
-// ── Per-month aggregates ─────────────────────────────────────────────────────
+// ── Build BillAggRow[] from resolved bills (for aggregateMonth) ──────────────
+function billAggRows(m: string): BillAggRow[] {
+  return resolvedBillsForMonth(m).map(b => ({
+    month: m,
+    monthly_target: b.amount,
+    paid_amount:    b.amount,
+    is_paid:        1,
+    is_cc_default:  b.isCc ? 1 : 0,
+    is_skipped:     0,
+  }));
+}
+
+// ── Per-month aggregates (past 12 months for burn line) ──────────────────────
 const aggregates: MonthAggregate[] = months.map(m => aggregateMonth({
   month:         m,
   summary:       sumMap.get(m) ?? null,
-  bills:         m === thisMonth ? currentBills : (billsByM[m] ?? []),
+  bills:         billAggRows(m),
   variableSpend: varByM[m] ?? [],
   bigPurchases:  bigByM[m] ?? [],
   cashExpenses:  cashByM[m] ?? [],
@@ -115,31 +142,47 @@ const baseline = baselineRatio(currentAgg);
 const burn     = burnLine(aggregates);
 const sankey   = buildSankey({ agg: currentAgg, savingsGoal });
 
-// ── Balance snapshot (from monthly_summary since Plaid may not be live) ──────
+// ── Balance snapshot ─────────────────────────────────────────────────────────
 const checking = currentSummary ? Number(currentSummary.checking_before) : 0;
 const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
-const ccDebt   = ccMtd;  // running card balance this month
+const ccDebt   = ccMtd;
 const net      = checking + savings - ccDebt;
 
-// Reserves: savings + investment accounts (from Plaid/manual accounts table)
-// Fall back to monthly_summary savings_before if no account rows
 const reserves = reserveAccounts.length > 0
   ? reserveAccounts.reduce((s, a) => s + (a.current_balance ?? 0), 0)
   : savings;
 
-// Remaining months for scenario projector (current month through Dec)
-const [curYear] = thisMonth.split('-').map(Number);
-const yearEnd = `${curYear}-12`;
+// ── Future months: real per-month baselines for scenario projector ────────────
+// Uses the same formula as budget.astro: income = salary + cash income,
+// expenses = checking bills + CC payment (cc_budget + CC subs) + cash expenses.
 const futureMonths: string[] = [];
 {
   let m = thisMonth;
   while (m <= yearEnd) {
     futureMonths.push(m);
-    const [y2, mo2] = m.split('-').map(Number);
-    const nd = new Date(y2, mo2, 1); // next month
-    m = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, '0')}`;
+    m = nextMo(m);
   }
 }
+
+const monthBaselines: MonthBaseline[] = futureMonths.map(m => {
+  const summary = sumMap.get(m);
+
+  // Income: salary (from monthly_summary) + cash income entries
+  const salary    = summary ? Number(summary.income_alex) + Number(summary.income_maham) : 0;
+  const cashIncome = (cashByM[m] ?? []).filter(e => e.type === 'income').reduce((s, e) => s + e.amount, 0);
+  const income    = salary + cashIncome;
+
+  // Expenses: checking bills + CC payment + cash expenses (non-income)
+  const bills = resolvedBillsForMonth(m);
+  const checkingBills = bills.filter(b => !b.isCc).reduce((s, b) => s + b.amount, 0);
+  const ccRecurring   = bills.filter(b =>  b.isCc).reduce((s, b) => s + b.amount, 0);
+  const ccBudget      = summary ? Number(summary.cc_budget ?? 0) : 0;
+  const ccPayment     = ccBudget + ccRecurring;
+  const cashOut       = (cashByM[m] ?? []).filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
+  const expenses      = checkingBills + ccPayment + cashOut;
+
+  return { month: m, income, expenses, net: income - expenses };
+});
 
 // ── Sparkline geometry ───────────────────────────────────────────────────────
 const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
@@ -158,8 +201,6 @@ const targetNodes = sankey.nodes.filter(n => n.kind === 'target');
 const nodeSum = (id: string) => sankey.links
   .filter(l => l.source === id || l.target === id)
   .reduce((s, l) => s + l.value, 0);
-const totalFlow = sankey.links.reduce((s, l) => s + l.value, 0) || 1;
-
 type NodeBox = { id: string; label: string; x: number; y: number; h: number };
 function layoutColumn(nodes: typeof sankey.nodes, x: number): NodeBox[] {
   const total = nodes.reduce((s, n) => s + nodeSum(n.id), 0) || 1;
@@ -397,16 +438,13 @@ const baseLabel =
     <h2 class="mb-1 text-xs uppercase tracking-wide text-stone-500">What If?</h2>
     <p class="mb-4 text-xs text-stone-400">
       Simulate a new bill, one-time purchase, or income change — see month-by-month impact through year-end.
-      Current pre-savings surplus: <span class="tabular-nums font-medium text-stone-700">{fmtCurrency(currentAgg.net)}/mo</span>.
       Reserves: <span class="tabular-nums font-medium text-stone-700">{fmtCurrency(reserves)}</span>.
     </p>
     <ImpactCalculator
       client:load
-      baseIncome={currentAgg.inflowTotal}
-      baseExpenses={currentAgg.outflowTotal}
+      monthBaselines={monthBaselines}
       currentSurplus={currentAgg.net}
       reserves={reserves}
-      remainingMonths={futureMonths}
     />
   </div>
 </Layout>

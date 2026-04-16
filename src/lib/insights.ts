@@ -231,95 +231,98 @@ export type Scenario =
   | { kind: 'one_time_purchase'; label: string; amount: number; month: string }
   | { kind: 'income_change';     label: string; deltaPct: number; startMonth: string };
 
+/** Per-month baseline from actual budget data. */
+export interface MonthBaseline {
+  month:    string;   // 'YYYY-MM'
+  income:   number;   // total inflow (salary + other cash income)
+  expenses: number;   // total outflow (fixed + subs + variable)
+  net:      number;   // income − expenses (pre-savings surplus)
+}
+
 export interface MonthProjection {
-  month:           string;   // 'YYYY-MM'
-  label:           string;   // 'May'
+  month:           string;
+  label:           string;
   baseIncome:      number;
   baseExpenses:    number;
-  baseNet:         number;   // income − expenses (pre-savings surplus)
+  baseNet:         number;
   scenarioIncome:  number;
   scenarioExpenses:number;
   scenarioNet:     number;
-  delta:           number;   // scenarioNet − baseNet
-  cumulativeDelta: number;   // running sum of delta
+  delta:           number;
+  cumulativeDelta: number;
 }
 
 export interface ScenarioResult {
   projections:       MonthProjection[];
-  totalDelta:        number;       // sum of all deltas
-  eoyBaseNet:        number;       // sum of baseNet for all projected months
-  eoyScenarioNet:    number;       // sum of scenarioNet
-  needsReserves:     boolean;      // does any month's cumulative delta push below zero?
-  reservesDraw:      number;       // max amount that would need to come from reserves
+  totalDelta:        number;
+  eoyBaseNet:        number;
+  eoyScenarioNet:    number;
+  needsReserves:     boolean;
+  reservesDraw:      number;
   verdict:           'comfortable' | 'tight' | 'needs_reserves';
 }
 
 /**
- * Projects a what-if scenario across the remaining months of the year.
+ * Projects a what-if scenario using real per-month budget data.
  *
- * Uses the current month's resolved budget as the repeating baseline:
- *   baseNet = baseIncome − baseExpenses (this is the pre-savings surplus)
- *
- * The scenario modifies income or expenses for qualifying months, showing
- * the month-by-month delta and whether reserves would need to be tapped.
+ * Each month in `monthBaselines` carries its own income/expenses/net from the
+ * actual budget (monthly_summary + bill_payments + cc data). The scenario
+ * overlays changes on top of each month's real figures.
  */
 export function projectScenario(params: {
   scenario:       Scenario;
-  baseIncome:     number;       // current month's total inflow (salary + other)
-  baseExpenses:   number;       // current month's total outflow (fixed + subs + variable)
-  remainingMonths: string[];    // ['2026-05', '2026-06', …, '2026-12']
-  currentSurplus: number;       // this month's surplus already banked (optional head start)
+  monthBaselines: MonthBaseline[];
+  currentSurplus: number;
 }): ScenarioResult {
-  const { scenario, baseIncome, baseExpenses, remainingMonths, currentSurplus } = params;
-  const baseNet = baseIncome - baseExpenses;
+  const { scenario, monthBaselines, currentSurplus } = params;
 
   const projections: MonthProjection[] = [];
   let cumDelta = 0;
   let minCumDelta = 0;
 
-  for (const m of remainingMonths) {
-    const [y, mo] = m.split('-').map(Number);
+  for (const mb of monthBaselines) {
+    const [y, mo] = mb.month.split('-').map(Number);
     const label = new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'short' });
 
-    let sIncome   = baseIncome;
-    let sExpenses = baseExpenses;
+    let sIncome   = mb.income;
+    let sExpenses = mb.expenses;
 
     if (scenario.kind === 'recurring_expense') {
-      if (m >= scenario.startMonth) sExpenses += scenario.amount;
+      if (mb.month >= scenario.startMonth) sExpenses += scenario.amount;
     } else if (scenario.kind === 'one_time_purchase') {
-      if (m === scenario.month) sExpenses += scenario.amount;
+      if (mb.month === scenario.month) sExpenses += scenario.amount;
     } else if (scenario.kind === 'income_change') {
-      if (m >= scenario.startMonth) {
-        const raise = baseIncome * (scenario.deltaPct / 100);
-        sIncome += raise;
+      if (mb.month >= scenario.startMonth) {
+        sIncome += mb.income * (scenario.deltaPct / 100);
       }
     }
 
     const sNet  = sIncome - sExpenses;
-    const delta = sNet - baseNet;
+    const delta = sNet - mb.net;
     cumDelta   += delta;
     if (cumDelta < minCumDelta) minCumDelta = cumDelta;
 
     projections.push({
-      month: m, label,
-      baseIncome, baseExpenses, baseNet,
+      month: mb.month, label,
+      baseIncome: mb.income, baseExpenses: mb.expenses, baseNet: mb.net,
       scenarioIncome: sIncome, scenarioExpenses: sExpenses, scenarioNet: sNet,
       delta, cumulativeDelta: cumDelta,
     });
   }
 
-  const eoyBaseNet     = baseNet * remainingMonths.length;
+  const eoyBaseNet     = projections.reduce((s, p) => s + p.baseNet, 0);
   const eoyScenarioNet = projections.reduce((s, p) => s + p.scenarioNet, 0);
   const totalDelta     = eoyScenarioNet - eoyBaseNet;
 
-  // Does the cumulative hit ever exceed the current-month surplus?
-  // If so, the user would need to dip into reserves.
   const needsReserves = (currentSurplus + minCumDelta) < 0;
   const reservesDraw  = needsReserves ? Math.abs(currentSurplus + minCumDelta) : 0;
 
+  const avgBaseNet = monthBaselines.length
+    ? eoyBaseNet / monthBaselines.length
+    : 0;
   const verdict: ScenarioResult['verdict'] =
     needsReserves ? 'needs_reserves'
-    : totalDelta < -baseNet ? 'tight'
+    : totalDelta < -avgBaseNet ? 'tight'
     : 'comfortable';
 
   return { projections, totalDelta, eoyBaseNet, eoyScenarioNet, needsReserves, reservesDraw, verdict };
