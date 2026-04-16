@@ -31,9 +31,10 @@ let varSpend: VariableSpendRow[]  = [];
 let bigCharges: CCCharge[]        = [];
 let cashRows: CashExpense[]       = [];
 let projRows: Array<{ id: string; monthly_target: number; is_cc_default: number }> = [];
+let reserveAccounts: Array<{ type: string; current_balance: number }> = [];
 
 try {
-  const [sumRes, billRes, varRes, ccRes, cashRes, projRes] = await Promise.all([
+  const [sumRes, billRes, varRes, ccRes, cashRes, projRes, acctRes] = await Promise.all([
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month >= ? ORDER BY month', args: [startMonth] }),
     client.execute({
       sql: `SELECT bp.month, bp.bill_id, bc.monthly_target, bp.amount as paid_amount,
@@ -47,14 +48,16 @@ try {
     client.execute({ sql: 'SELECT * FROM cc_charges WHERE month >= ? AND is_big_purchase = 1', args: [startMonth] }),
     client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month >= ?', args: [startMonth] }),
     client.execute('SELECT id, monthly_target, is_cc_default FROM budget_config WHERE is_recurring = 1'),
+    client.execute("SELECT type, current_balance FROM accounts WHERE is_active = 1 AND type IN ('savings','investment')").catch(() => ({ rows: [] })),
   ]);
 
-  summaries  = sumRes.rows  as unknown as MonthlySummary[];
-  billRows   = billRes.rows as unknown as (BillAggRow & { bill_id: string })[];
-  varSpend   = varRes.rows  as unknown as VariableSpendRow[];
-  bigCharges = ccRes.rows   as unknown as CCCharge[];
-  cashRows   = cashRes.rows as unknown as CashExpense[];
-  projRows   = projRes.rows as unknown as typeof projRows;
+  summaries       = sumRes.rows   as unknown as MonthlySummary[];
+  billRows        = billRes.rows  as unknown as (BillAggRow & { bill_id: string })[];
+  varSpend        = varRes.rows   as unknown as VariableSpendRow[];
+  bigCharges      = ccRes.rows    as unknown as CCCharge[];
+  cashRows        = cashRes.rows  as unknown as CashExpense[];
+  projRows        = projRes.rows  as unknown as typeof projRows;
+  reserveAccounts = acctRes.rows  as unknown as typeof reserveAccounts;
 } finally {
   client.close();
 }
@@ -118,9 +121,25 @@ const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
 const ccDebt   = ccMtd;  // running card balance this month
 const net      = checking + savings - ccDebt;
 
-// Free cash flow: avg of last 3 complete months' net (excluding current month)
-const recent3    = aggregates.slice(-4, -1);
-const recentNet  = recent3.length ? recent3.reduce((s, a) => s + a.net, 0) / recent3.length : currentAgg.net;
+// Reserves: savings + investment accounts (from Plaid/manual accounts table)
+// Fall back to monthly_summary savings_before if no account rows
+const reserves = reserveAccounts.length > 0
+  ? reserveAccounts.reduce((s, a) => s + (a.current_balance ?? 0), 0)
+  : savings;
+
+// Remaining months for scenario projector (current month through Dec)
+const [curYear] = thisMonth.split('-').map(Number);
+const yearEnd = `${curYear}-12`;
+const futureMonths: string[] = [];
+{
+  let m = thisMonth;
+  while (m <= yearEnd) {
+    futureMonths.push(m);
+    const [y2, mo2] = m.split('-').map(Number);
+    const nd = new Date(y2, mo2, 1); // next month
+    m = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, '0')}`;
+  }
+}
 
 // ── Sparkline geometry ───────────────────────────────────────────────────────
 const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
@@ -373,17 +392,21 @@ const baseLabel =
     </div>
   )}
 
-  <!-- ── Purchase Impact Calculator ── -->
+  <!-- ── Scenario Projector ── -->
   <div class="rounded-xl border border-surface-border bg-surface-card p-5">
-    <h2 class="mb-1 text-xs uppercase tracking-wide text-stone-500">Purchase Impact</h2>
+    <h2 class="mb-1 text-xs uppercase tracking-wide text-stone-500">What If?</h2>
     <p class="mb-4 text-xs text-stone-400">
-      Simulate a purchase against this month's Safe-to-Spend and your recent free cash flow ({fmtCurrency(recentNet, { compact: true, sign: true })}/mo avg).
+      Simulate a new bill, one-time purchase, or income change — see month-by-month impact through year-end.
+      Current pre-savings surplus: <span class="tabular-nums font-medium text-stone-700">{fmtCurrency(currentAgg.net)}/mo</span>.
+      Reserves: <span class="tabular-nums font-medium text-stone-700">{fmtCurrency(reserves)}</span>.
     </p>
     <ImpactCalculator
       client:load
-      monthlyFreeFlow={recentNet}
-      safeToSpendBase={sts.amount}
-      currentSavings={savings}
+      baseIncome={currentAgg.inflowTotal}
+      baseExpenses={currentAgg.outflowTotal}
+      currentSurplus={currentAgg.net}
+      reserves={reserves}
+      remainingMonths={futureMonths}
     />
   </div>
 </Layout>

@@ -1,184 +1,278 @@
 import { useState, useMemo } from 'react';
-import { cashImpact, financeImpact, fmtCurrency } from '../lib/insights';
+import { projectScenario, fmtCurrency, type Scenario, type ScenarioResult } from '../lib/insights';
 
 interface Props {
-  monthlyFreeFlow: number;  // avg monthly net from recent months
-  safeToSpendBase: number;  // current month's Safe-to-Spend
-  currentSavings:  number;
+  baseIncome:      number;
+  baseExpenses:    number;
+  currentSurplus:  number;  // this month's net pre-savings
+  reserves:        number;  // savings + investment account balances
+  remainingMonths: string[];  // ['2026-05', …, '2026-12']
 }
 
-type Mode = 'cash' | 'finance';
+type ScenarioKind = 'recurring_expense' | 'one_time_purchase' | 'income_change';
+
+const TAB_LABELS: Record<ScenarioKind, string> = {
+  recurring_expense:  'New Recurring Bill',
+  one_time_purchase:  'One-Time Purchase',
+  income_change:      'Income Change',
+};
+
+function fmt(n: number): string { return fmtCurrency(n); }
+function fmtCompact(n: number): string { return fmtCurrency(n, { compact: true }); }
+function fmtSign(n: number): string { return fmtCurrency(n, { sign: true }); }
 
 export default function ImpactCalculator({
-  monthlyFreeFlow,
-  safeToSpendBase,
-  currentSavings,
+  baseIncome,
+  baseExpenses,
+  currentSurplus,
+  reserves,
+  remainingMonths,
 }: Props) {
-  const [mode,    setMode]    = useState<Mode>('cash');
-  const [price,   setPrice]   = useState(2_500);
-  const [apr,     setApr]     = useState(24);
-  const [payment, setPayment] = useState(250);
+  const [kind, setKind] = useState<ScenarioKind>('recurring_expense');
 
-  const cash    = useMemo(() => cashImpact({ price, monthlyFreeFlow, safeToSpendBase }), [price, monthlyFreeFlow, safeToSpendBase]);
-  const finance = useMemo(() => financeImpact({ price, aprPct: apr, monthlyPayment: payment, safeToSpendBase }), [price, apr, payment, safeToSpendBase]);
+  // ── Recurring expense state ──
+  const [recurLabel, setRecurLabel]   = useState('Car note');
+  const [recurAmount, setRecurAmount] = useState(450);
+  const [recurStart, setRecurStart]   = useState(remainingMonths[0] ?? '');
 
-  const MAX_PRICE = 50_000;
+  // ── One-time purchase state ──
+  const [onetimeLabel, setOnetimeLabel]   = useState('New couch');
+  const [onetimeAmount, setOnetimeAmount] = useState(5000);
+  const [onetimeMonth, setOnetimeMonth]   = useState(remainingMonths[0] ?? '');
+
+  // ── Income change state ──
+  const [raisePct, setRaisePct]     = useState(5);
+  const [raiseStart, setRaiseStart] = useState(remainingMonths[Math.min(3, remainingMonths.length - 1)] ?? '');
+
+  const scenario: Scenario = useMemo(() => {
+    if (kind === 'recurring_expense') {
+      return { kind, label: recurLabel, amount: recurAmount, startMonth: recurStart };
+    } else if (kind === 'one_time_purchase') {
+      return { kind, label: onetimeLabel, amount: onetimeAmount, month: onetimeMonth };
+    } else {
+      return { kind, label: `${raisePct}% raise`, deltaPct: raisePct, startMonth: raiseStart };
+    }
+  }, [kind, recurLabel, recurAmount, recurStart, onetimeLabel, onetimeAmount, onetimeMonth, raisePct, raiseStart]);
+
+  const result = useMemo(
+    () => projectScenario({ scenario, baseIncome, baseExpenses, remainingMonths, currentSurplus }),
+    [scenario, baseIncome, baseExpenses, remainingMonths, currentSurplus],
+  );
+
+  const monthLabel = (m: string) => {
+    const [y, mo] = m.split('-').map(Number);
+    return new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'short' });
+  };
 
   return (
     <div className="space-y-4 text-sm">
-      {/* Mode switcher */}
-      <div className="inline-flex rounded-lg border border-surface-border bg-surface p-0.5">
-        <button
-          onClick={() => setMode('cash')}
-          className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-            mode === 'cash' ? 'bg-surface-card text-stone-800 shadow-sm' : 'text-stone-400 hover:text-stone-600'
-          }`}
-          type="button"
-        >Pay in Cash</button>
-        <button
-          onClick={() => setMode('finance')}
-          className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-            mode === 'finance' ? 'bg-surface-card text-stone-800 shadow-sm' : 'text-stone-400 hover:text-stone-600'
-          }`}
-          type="button"
-        >Finance</button>
+      {/* Tab switcher */}
+      <div className="flex flex-wrap gap-1">
+        {(Object.keys(TAB_LABELS) as ScenarioKind[]).map(k => (
+          <button
+            key={k}
+            onClick={() => setKind(k)}
+            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+              kind === k ? 'bg-stone-800 text-white' : 'bg-surface border border-surface-border text-stone-500 hover:text-stone-700'
+            }`}
+            type="button"
+          >{TAB_LABELS[k]}</button>
+        ))}
       </div>
 
-      {/* Price slider */}
-      <div>
-        <div className="flex justify-between text-xs text-stone-400 mb-1">
-          <span>Purchase price</span>
-          <span className="tabular-nums font-medium text-stone-700">{fmtCurrency(price)}</span>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={MAX_PRICE}
-          step={100}
-          value={price}
-          onChange={e => setPrice(Number(e.target.value))}
-          className="w-full accent-lime-600"
-        />
-        <div className="flex justify-between text-xs text-stone-400 mt-0.5">
-          <span>$0</span>
-          <span>{fmtCurrency(MAX_PRICE, { compact: true })}</span>
-        </div>
+      {/* Inputs */}
+      <div className="rounded-lg border border-surface-border bg-surface p-3 space-y-3">
+        {kind === 'recurring_expense' && (
+          <>
+            <div className="grid grid-cols-3 gap-3">
+              <label className="block col-span-1">
+                <span className="text-xs text-stone-400">Name</span>
+                <input type="text" value={recurLabel} onChange={e => setRecurLabel(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs text-stone-400">Monthly amount</span>
+                <input type="number" step="25" min={0} value={recurAmount} onChange={e => setRecurAmount(Number(e.target.value))}
+                  className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm tabular-nums" />
+              </label>
+              <label className="block">
+                <span className="text-xs text-stone-400">Starting</span>
+                <select value={recurStart} onChange={e => setRecurStart(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm">
+                  {remainingMonths.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+                </select>
+              </label>
+            </div>
+          </>
+        )}
+
+        {kind === 'one_time_purchase' && (
+          <div className="grid grid-cols-3 gap-3">
+            <label className="block">
+              <span className="text-xs text-stone-400">What</span>
+              <input type="text" value={onetimeLabel} onChange={e => setOnetimeLabel(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm" />
+            </label>
+            <label className="block">
+              <span className="text-xs text-stone-400">Cost</span>
+              <input type="number" step="100" min={0} value={onetimeAmount} onChange={e => setOnetimeAmount(Number(e.target.value))}
+                className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm tabular-nums" />
+            </label>
+            <label className="block">
+              <span className="text-xs text-stone-400">Month</span>
+              <select value={onetimeMonth} onChange={e => setOnetimeMonth(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm">
+                {remainingMonths.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+
+        {kind === 'income_change' && (
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-xs text-stone-400">Raise %</span>
+              <input type="number" step="0.5" min={-50} max={100} value={raisePct} onChange={e => setRaisePct(Number(e.target.value))}
+                className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm tabular-nums" />
+            </label>
+            <label className="block">
+              <span className="text-xs text-stone-400">Starting</span>
+              <select value={raiseStart} onChange={e => setRaiseStart(e.target.value)}
+                className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm">
+                {remainingMonths.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
       </div>
 
-      {/* Finance-only inputs */}
-      {mode === 'finance' && (
-        <div className="grid grid-cols-2 gap-3">
-          <label className="block">
-            <span className="text-xs text-stone-400">APR %</span>
-            <input
-              type="number"
-              step="0.1"
-              min={0}
-              max={40}
-              value={apr}
-              onChange={e => setApr(Number(e.target.value))}
-              className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm tabular-nums"
-            />
-          </label>
-          <label className="block">
-            <span className="text-xs text-stone-400">Monthly payment</span>
-            <input
-              type="number"
-              step="10"
-              min={0}
-              value={payment}
-              onChange={e => setPayment(Number(e.target.value))}
-              className="mt-1 w-full rounded-md border border-surface-border bg-surface-card px-2 py-1.5 text-sm tabular-nums"
-            />
-          </label>
-        </div>
-      )}
+      {/* Verdict */}
+      <Verdict result={result} reserves={reserves} />
 
-      {/* Results */}
-      {mode === 'cash' ? (
-        <CashResults result={cash} currentSavings={currentSavings} price={price} />
-      ) : (
-        <FinanceResults result={finance} price={price} />
-      )}
+      {/* Month-by-month table */}
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="border-b border-surface-border text-stone-400">
+              <th className="px-2 py-1.5 text-left font-medium">Month</th>
+              <th className="px-2 py-1.5 text-right font-medium">Income</th>
+              <th className="px-2 py-1.5 text-right font-medium">Expenses</th>
+              <th className="px-2 py-1.5 text-right font-medium">Net (pre-savings)</th>
+              <th className="px-2 py-1.5 text-right font-medium">vs Baseline</th>
+              <th className="px-2 py-1.5 text-right font-medium">Cumulative</th>
+            </tr>
+          </thead>
+          <tbody>
+            {result.projections.map(p => {
+              const isHit = p.delta !== 0;
+              return (
+                <tr key={p.month} className={`border-b border-surface-border/50 ${isHit ? 'bg-stone-50' : ''}`}>
+                  <td className="px-2 py-1.5 font-medium text-stone-700">{p.label}</td>
+                  <td className="px-2 py-1.5 text-right tabular-nums text-stone-600">
+                    {p.scenarioIncome !== p.baseIncome ? (
+                      <span className="text-brand-green">{fmt(p.scenarioIncome)}</span>
+                    ) : fmt(p.scenarioIncome)}
+                  </td>
+                  <td className="px-2 py-1.5 text-right tabular-nums text-stone-600">
+                    {p.scenarioExpenses !== p.baseExpenses ? (
+                      <span className="text-brand-red">{fmt(p.scenarioExpenses)}</span>
+                    ) : fmt(p.scenarioExpenses)}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right tabular-nums font-medium ${
+                    p.scenarioNet < 0 ? 'text-brand-red' : 'text-stone-700'
+                  }`}>
+                    {fmt(p.scenarioNet)}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right tabular-nums ${
+                    p.delta < 0 ? 'text-brand-red' : p.delta > 0 ? 'text-brand-green' : 'text-stone-400'
+                  }`}>
+                    {p.delta !== 0 ? fmtSign(p.delta) : '—'}
+                  </td>
+                  <td className={`px-2 py-1.5 text-right tabular-nums font-medium ${
+                    p.cumulativeDelta < 0 ? 'text-brand-red' : p.cumulativeDelta > 0 ? 'text-brand-green' : 'text-stone-400'
+                  }`}>
+                    {p.cumulativeDelta !== 0 ? fmtSign(p.cumulativeDelta) : '—'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="border-t-2 border-surface-border font-medium">
+              <td className="px-2 py-2 text-stone-700">Year-end</td>
+              <td className="px-2 py-2 text-right tabular-nums text-stone-600">
+                {fmtCompact(result.projections.reduce((s, p) => s + p.scenarioIncome, 0))}
+              </td>
+              <td className="px-2 py-2 text-right tabular-nums text-stone-600">
+                {fmtCompact(result.projections.reduce((s, p) => s + p.scenarioExpenses, 0))}
+              </td>
+              <td className={`px-2 py-2 text-right tabular-nums ${
+                result.eoyScenarioNet < 0 ? 'text-brand-red' : 'text-stone-700'
+              }`}>
+                {fmt(result.eoyScenarioNet)}
+              </td>
+              <td className={`px-2 py-2 text-right tabular-nums ${
+                result.totalDelta < 0 ? 'text-brand-red' : result.totalDelta > 0 ? 'text-brand-green' : 'text-stone-400'
+              }`}>
+                {result.totalDelta !== 0 ? fmtSign(result.totalDelta) : '—'}
+              </td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </div>
     </div>
   );
 }
 
-function CashResults({ result, currentSavings, price }: { result: ReturnType<typeof cashImpact>; currentSavings: number; price: number }) {
-  if (result.error) {
+function Verdict({ result, reserves }: { result: ScenarioResult; reserves: number }) {
+  if (result.totalDelta === 0) return null;
+
+  const isPositive = result.totalDelta > 0;
+
+  if (isPositive) {
     return (
-      <div className="rounded-lg border border-brand-red/30 bg-brand-red/5 px-3 py-2 text-xs text-brand-red">
-        {result.error}
+      <div className="rounded-lg border border-brand-green/30 bg-brand-green/5 px-4 py-3">
+        <p className="text-sm font-medium text-brand-green">Extra {fmtCurrency(result.totalDelta)} by year-end</p>
+        <p className="mt-0.5 text-xs text-stone-500">
+          This adds {fmtCurrency(result.totalDelta, { compact: true })} to your annual surplus.
+          Baseline year-end net: {fmtCurrency(result.eoyBaseNet, { compact: true })} → {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
+        </p>
       </div>
     );
   }
 
-  const months = result.monthsToRecover;
-  const monthsLabel = months < 1
-    ? `${Math.round(months * 30)} days`
-    : months < 24
-      ? `${months.toFixed(1)} months`
-      : `${(months / 12).toFixed(1)} years`;
-
-  return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-3 gap-2">
-        <Stat label="Time to recover"      value={monthsLabel}                          accent />
-        <Stat label="Replenished by"       value={result.recoverLabel}                   accent />
-        <Stat label="After-purchase cash"  value={fmtCurrency(currentSavings - price, { compact: true })}
-              tone={currentSavings - price < 0 ? 'red' : 'default'} />
-      </div>
-      <p className="text-xs text-stone-400">
-        New Safe-to-Spend this month: <span className={`tabular-nums ${result.newSafeToSpend < 0 ? 'text-brand-red' : 'text-stone-700'}`}>
-          {fmtCurrency(result.newSafeToSpend)}
-        </span>
-      </p>
-    </div>
-  );
-}
-
-function FinanceResults({ result, price }: { result: ReturnType<typeof financeImpact>; price: number }) {
-  if (result.error) {
+  if (result.verdict === 'needs_reserves') {
+    const covered = reserves >= result.reservesDraw;
     return (
-      <div className="rounded-lg border border-brand-red/30 bg-brand-red/5 px-3 py-2 text-xs text-brand-red">
-        {result.error}
+      <div className={`rounded-lg border px-4 py-3 ${covered ? 'border-brand-yellow/30 bg-brand-yellow/5' : 'border-brand-red/30 bg-brand-red/5'}`}>
+        <p className={`text-sm font-medium ${covered ? 'text-brand-yellow' : 'text-brand-red'}`}>
+          Needs {fmtCurrency(result.reservesDraw)} from reserves
+        </p>
+        <p className="mt-0.5 text-xs text-stone-500">
+          Your monthly surplus won't cover this — you'd need to pull {fmtCurrency(result.reservesDraw, { compact: true })} from
+          savings/investments ({fmtCurrency(reserves, { compact: true })} available).
+          {covered
+            ? ' You can handle this.'
+            : ` That exceeds your reserves by ${fmtCurrency(result.reservesDraw - reserves, { compact: true })}.`}
+        </p>
       </div>
     );
   }
 
-  const years = (result.monthsToPayOff / 12).toFixed(1);
-
+  // Tight but doable
   return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-3 gap-2">
-        <Stat label="Payoff time"   value={`${result.monthsToPayOff} mo (${years} yr)`} accent />
-        <Stat label="Total interest" value={fmtCurrency(result.totalInterest, { compact: true })} tone="red" />
-        <Stat label="True cost"      value={fmtCurrency(result.trueCost, { compact: true })} tone="red" />
-      </div>
-      <p className="text-xs text-stone-400">
-        New Safe-to-Spend each month:{' '}
-        <span className={`tabular-nums ${result.newSafeToSpend < 0 ? 'text-brand-red' : 'text-stone-700'}`}>
-          {fmtCurrency(result.newSafeToSpend)}
-        </span>
-        <span className="ml-2 text-stone-400">
-          (interest = {fmtCurrency(result.totalInterest - price + price, { compact: true }).replace('-', '')} on top of {fmtCurrency(price, { compact: true })})
-        </span>
+    <div className="rounded-lg border border-brand-yellow/30 bg-brand-yellow/5 px-4 py-3">
+      <p className="text-sm font-medium text-brand-yellow">
+        {fmtCurrency(Math.abs(result.totalDelta))} less by year-end — but doable
       </p>
-    </div>
-  );
-}
-
-function Stat({ label, value, accent, tone = 'default' }: {
-  label: string;
-  value: string;
-  accent?: boolean;
-  tone?: 'default' | 'red';
-}) {
-  const color = tone === 'red' ? 'text-brand-red' : accent ? 'text-stone-800' : 'text-stone-700';
-  return (
-    <div className="rounded-lg border border-surface-border bg-surface px-3 py-2">
-      <p className="text-[10px] uppercase tracking-wide text-stone-400">{label}</p>
-      <p className={`mt-0.5 text-sm font-semibold tabular-nums ${color}`}>{value}</p>
+      <p className="mt-0.5 text-xs text-stone-500">
+        Your baseline pre-savings surplus absorbs this.
+        Year-end net drops from {fmtCurrency(result.eoyBaseNet, { compact: true })} to {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
+        {result.eoyScenarioNet > 0
+          ? ' Still positive — savings just grow slower.'
+          : ' This puts you into deficit territory — watch closely.'}
+      </p>
     </div>
   );
 }
