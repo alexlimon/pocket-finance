@@ -4,7 +4,7 @@ import ImpactCalculator from '../components/ImpactCalculator';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import {
-  aggregateMonth, safeToSpend, baselineRatio, burnLine, buildSankey,
+  aggregateMonth, baselineRatio, burnLine, buildSankey,
   fmtCurrency, fmtPct,
   type BillAggRow, type VariableSpendRow, type MonthAggregate, type MonthBaseline,
 } from '../lib/insights';
@@ -139,23 +139,10 @@ const currentSummary = sumMap.get(thisMonth);
 const savingsGoal = currentSummary
   ? Math.max(0, Number(currentSummary.savings_after) - Number(currentSummary.savings_before))
   : 0;
-const ccMtd = (varByM[thisMonth] ?? []).reduce((s, v) => s + v.amount, 0)
-            + (bigByM[thisMonth] ?? []).reduce((s, c) => s + c.amount, 0);
 
-const sts      = safeToSpend({ agg: currentAgg, savingsGoal, ccMtd });
 const baseline = baselineRatio(currentAgg);
 const burn     = burnLine(aggregates);
 const sankey   = buildSankey({ agg: currentAgg, savingsGoal });
-
-// ── Balance snapshot ─────────────────────────────────────────────────────────
-const checking = currentSummary ? Number(currentSummary.checking_before) : 0;
-const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
-const ccDebt   = ccMtd;
-const net      = checking + savings - ccDebt;
-
-const reserves = reserveAccounts.length > 0
-  ? reserveAccounts.reduce((s, a) => s + (a.current_balance ?? 0), 0)
-  : savings;
 
 // ── Future months: real per-month baselines for scenario projector ────────────
 // Uses the same formula as budget.astro: income = salary + cash income,
@@ -169,7 +156,13 @@ const futureMonths: string[] = [];
   }
 }
 
-const monthBaselines: MonthBaseline[] = futureMonths.map(m => {
+interface DetailedBaseline extends MonthBaseline {
+  checkingBills: number;
+  ccPayment:     number;
+  cashOut:       number;
+}
+
+const monthBaselines: DetailedBaseline[] = futureMonths.map(m => {
   const summary = sumMap.get(m);
 
   // Income: salary (from monthly_summary) + cash income entries
@@ -186,8 +179,22 @@ const monthBaselines: MonthBaseline[] = futureMonths.map(m => {
   const cashOut       = (cashByM[m] ?? []).filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   const expenses      = checkingBills + ccPayment + cashOut;
 
-  return { month: m, income, expenses, net: income - expenses };
+  return { month: m, income, expenses, net: income - expenses, checkingBills, ccPayment, cashOut };
 });
+
+// ── Safe to Spend (current month) — uses budget-page formula ─────────────────
+const curBL = monthBaselines[0];  // first entry = thisMonth
+const stsAmount   = curBL.net - savingsGoal;
+const stsState    = stsAmount <= 0 ? 'deficit' as const : stsAmount < 500 ? 'tight' as const : 'healthy' as const;
+
+// ── Balance snapshot ─────────────────────────────────────────────────────────
+const checking = currentSummary ? Number(currentSummary.checking_before) : 0;
+const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
+const totalLiquid = checking + savings;
+
+const reserves = reserveAccounts.length > 0
+  ? reserveAccounts.reduce((s, a) => s + (a.current_balance ?? 0), 0)
+  : savings;
 
 // ── Sparkline geometry ───────────────────────────────────────────────────────
 const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
@@ -267,8 +274,8 @@ const today = new Date();
 const monthName = today.toLocaleString('en-US', { month: 'long' });
 
 const stsColor =
-  sts.state === 'deficit' ? 'text-brand-red'
-  : sts.state === 'tight' ? 'text-brand-yellow'
+  stsState === 'deficit' ? 'text-brand-red'
+  : stsState === 'tight' ? 'text-brand-yellow'
   : 'text-brand-green';
 const baseColor =
   baseline.band === 'rigid'    ? 'text-brand-red'
@@ -288,27 +295,30 @@ const baseLabel =
 
   <!-- ── Safe to Spend hero ── -->
   <div class={`mb-6 rounded-xl border-2 p-5 ${
-    sts.state === 'deficit' ? 'border-brand-red/40 bg-brand-red/5'
-    : sts.state === 'tight' ? 'border-brand-yellow/40 bg-brand-yellow/5'
+    stsState === 'deficit' ? 'border-brand-red/40 bg-brand-red/5'
+    : stsState === 'tight' ? 'border-brand-yellow/40 bg-brand-yellow/5'
     : 'border-brand-green/30 bg-surface-card'
   }`}>
     <div class="flex items-start justify-between gap-4 flex-wrap">
       <div>
         <p class="text-xs uppercase tracking-wide text-stone-500">Safe to Spend — {monthName}</p>
-        <p class={`mt-1 text-4xl font-bold tabular-nums ${stsColor}`}>{fmtCurrency(sts.amount)}</p>
-        {sts.state === 'deficit' ? (
+        <p class={`mt-1 text-4xl font-bold tabular-nums ${stsColor}`}>{fmtCurrency(stsAmount)}</p>
+        {stsState === 'deficit' ? (
           <p class="mt-1 text-xs text-brand-red">Critical deficit — spending will pull from reserves.</p>
-        ) : sts.state === 'tight' ? (
+        ) : stsState === 'tight' ? (
           <p class="mt-1 text-xs text-brand-yellow">Tight month — buffer is thin.</p>
         ) : (
           <p class="mt-1 text-xs text-stone-400">Remaining allowance after commitments.</p>
         )}
       </div>
       <div class="text-right text-xs tabular-nums text-stone-500 space-y-0.5">
-        <div>Inflow: <span class="text-stone-700">{fmtCurrency(sts.inflow)}</span></div>
-        <div>− Fixed + Subs: <span class="text-stone-700">{fmtCurrency(sts.fixed)}</span></div>
-        <div>− Savings goal: <span class="text-stone-700">{fmtCurrency(sts.savingsGoal)}</span></div>
-        <div>− CC month-to-date: <span class="text-stone-700">{fmtCurrency(sts.ccMtd)}</span></div>
+        <div>Income: <span class="text-stone-700">{fmtCurrency(curBL.income)}</span></div>
+        <div>− Bills: <span class="text-stone-700">{fmtCurrency(curBL.checkingBills)}</span></div>
+        <div>− CC Payment: <span class="text-stone-700">{fmtCurrency(curBL.ccPayment)}</span></div>
+        {curBL.cashOut > 0 && (
+          <div>− Cash Expenses: <span class="text-stone-700">{fmtCurrency(curBL.cashOut)}</span></div>
+        )}
+        <div>− Savings: <span class="text-stone-700">{fmtCurrency(savingsGoal)}</span></div>
       </div>
     </div>
   </div>
@@ -324,15 +334,15 @@ const baseLabel =
       <p class="mt-1 text-lg font-semibold tabular-nums text-brand-green">{fmtCurrency(savings)}</p>
     </div>
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
-      <p class="text-xs text-stone-400">CC Balance (MTD)</p>
-      <p class={`mt-1 text-lg font-semibold tabular-nums ${ccDebt > 0 ? 'text-brand-red' : 'text-stone-500'}`}>
-        {fmtCurrency(ccDebt)}
+      <p class="text-xs text-stone-400">Monthly Net</p>
+      <p class={`mt-1 text-lg font-semibold tabular-nums ${curBL.net >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+        {fmtCurrency(curBL.net)}
       </p>
     </div>
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
-      <p class="text-xs text-stone-400">Net Position</p>
-      <p class={`mt-1 text-lg font-semibold tabular-nums ${net >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
-        {fmtCurrency(net)}
+      <p class="text-xs text-stone-400">Total Liquid</p>
+      <p class={`mt-1 text-lg font-semibold tabular-nums ${totalLiquid >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+        {fmtCurrency(totalLiquid)}
       </p>
     </div>
   </div>
