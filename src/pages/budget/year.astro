@@ -13,34 +13,58 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct'
 
 const client = getClient(env);
 let summaries: Record<string, MonthlySummary> = {};
-let billsByMonth: Record<string, BillRow[]> = {};
+// billsByMonth[month] = list of non-CC recurring bills with resolved amounts
+let billsByMonth: Record<string, { id: string; name: string; actual_amount: number; is_cc: number }[]> = {};
 let ccByMonth: Record<string, CCCharge[]> = {};
+let ccVariableByMonth: Record<string, number> = {};
 
 try {
-  const [sumRes, billRes, ccRes] = await Promise.all([
+  const [sumRes, configRes, payRes, ccRes, ccVarRes] = await Promise.all([
     client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
+    // All non-CC recurring bills (the defaults)
     client.execute({
-      sql: `SELECT bc.id, bc.name, bc.monthly_target, bc.is_cc_default,
-                   bp.month, bp.amount as paid_amount, bp.is_paid, bp.is_cc
-            FROM budget_config bc
-            JOIN bill_payments bp ON bc.id = bp.bill_id
-            WHERE bp.month LIKE ? AND bp.is_paid = 1`,
+      sql: `SELECT id, name, monthly_target, is_cc_default FROM budget_config WHERE is_recurring = 1 AND is_cc_default = 0`,
+      args: [],
+    }),
+    // All bill_payments for this year (paid or unpaid, but not skipped)
+    client.execute({
+      sql: `SELECT bill_id, month, amount, is_paid, is_cc, is_skipped FROM bill_payments WHERE month LIKE ?`,
       args: [`${year}-%`],
     }),
     client.execute({ sql: `SELECT * FROM cc_charges WHERE month LIKE ?`, args: [`${year}-%`] }),
+    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month LIKE ? GROUP BY month`, args: [`${year}-%`] }),
   ]);
 
   for (const r of sumRes.rows) {
     const s = r as unknown as MonthlySummary;
     summaries[s.month] = s;
   }
-  for (const r of billRes.rows as unknown as any[]) {
-    if (!billsByMonth[r.month]) billsByMonth[r.month] = [];
-    billsByMonth[r.month].push({ ...r, actual_amount: Number(r.paid_amount ?? r.monthly_target ?? 0) });
+
+  // Index payments by "month|bill_id"
+  const payMap = new Map<string, { amount: number; is_skipped: number }>();
+  for (const r of payRes.rows as unknown as any[]) {
+    payMap.set(`${r.month}|${r.bill_id}`, { amount: Number(r.amount), is_skipped: Number(r.is_skipped) });
   }
+
+  // For each month in the year, resolve every recurring bill's amount
+  const configs = configRes.rows as unknown as { id: string; name: string; monthly_target: number | null; is_cc_default: number }[];
+  for (const mo of months) {
+    billsByMonth[mo] = configs
+      .map(bc => {
+        const pay = payMap.get(`${mo}|${bc.id}`);
+        if (pay?.is_skipped) return null;
+        const actual_amount = pay ? pay.amount : Number(bc.monthly_target ?? 0);
+        return { id: bc.id, name: bc.name, actual_amount, is_cc: Number(bc.is_cc_default) };
+      })
+      .filter((b): b is NonNullable<typeof b> => b !== null);
+  }
+
   for (const r of ccRes.rows as unknown as CCCharge[]) {
     if (!ccByMonth[r.month]) ccByMonth[r.month] = [];
     ccByMonth[r.month].push(r);
+  }
+  for (const r of ccVarRes.rows as unknown as { month: string; total: number }[]) {
+    ccVariableByMonth[r.month] = Number(r.total);
   }
 } finally { client.close(); }
 
@@ -49,11 +73,9 @@ function getOrEmpty(month: string): MonthlySummary {
 }
 
 function ccSpend(month: string): number {
-  const bills = billsByMonth[month] ?? [];
-  const ccs   = ccByMonth[month] ?? [];
-  const recurring = bills.filter((b:any) => b.is_cc).reduce((s:number,b:any)=>s+Number(b.actual_amount),0);
-  const variable  = ccs.reduce((s,c)=>s+c.amount,0);
-  return recurring + variable;
+  const bigPurchases = (ccByMonth[month] ?? []).reduce((s, c) => s + c.amount, 0);
+  const variable     = ccVariableByMonth[month] ?? 0;
+  return variable + bigPurchases;
 }
 function checkingOut(month: string): number {
   return (billsByMonth[month] ?? []).filter((b:any)=>!b.is_cc).reduce((s:number,b:any)=>s+Number(b.actual_amount),0);

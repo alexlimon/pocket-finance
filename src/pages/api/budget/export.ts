@@ -15,46 +15,52 @@ export async function GET(context: APIContext): Promise<Response> {
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
   const client = getClient(env);
-  let summaries:  Record<string, MonthlySummary> = {};
-  let billsByMonth: Record<string, BillRow[]>    = {};
-  let ccByMonth:    Record<string, CCCharge[]>   = {};
-  let cashByMonth:  Record<string, CashExpense[]>= {};
-  let allBills:     { id: string; name: string; is_cc_default: number; due_day: number | null }[] = [];
+  let summaries:    Record<string, MonthlySummary> = {};
+  let payByMonthBill: Record<string, { amount: number; is_skipped: number }> = {}; // key = "month|bill_id"
+  let ccByMonth:    Record<string, CCCharge[]>    = {};
+  let cashByMonth:  Record<string, CashExpense[]> = {};
+  let ccVarByMonth: Record<string, number>        = {};
+  let allBills:     { id: string; name: string; monthly_target: number | null; is_cc_default: number; due_day: number | null }[] = [];
 
   try {
-    const [sumR, billCfgR, billPayR, ccR, cashR] = await Promise.all([
+    const [sumR, billCfgR, billPayR, ccR, cashR, ccVarR] = await Promise.all([
       client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
-      client.execute({ sql: `SELECT id, name, is_cc_default, due_day FROM budget_config WHERE is_recurring = 1 ORDER BY is_cc_default, name` }),
+      client.execute({ sql: `SELECT id, name, monthly_target, is_cc_default, due_day FROM budget_config WHERE is_recurring = 1 ORDER BY is_cc_default, name` }),
       client.execute({
-        sql: `SELECT bc.id as bill_id, bc.name, bc.is_cc_default, bp.month, bp.amount as paid_amount, bp.is_paid, bp.is_cc
-              FROM budget_config bc JOIN bill_payments bp ON bc.id = bp.bill_id WHERE bp.month LIKE ?`,
+        sql: `SELECT bill_id, month, amount, is_skipped FROM bill_payments WHERE month LIKE ?`,
         args: [`${year}-%`],
       }),
       client.execute({ sql: `SELECT * FROM cc_charges WHERE month LIKE ?`, args: [`${year}-%`] }),
       client.execute({ sql: `SELECT * FROM cash_expenses WHERE month LIKE ?`, args: [`${year}-%`] }),
+      client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month LIKE ? GROUP BY month`, args: [`${year}-%`] }),
     ]);
 
-    for (const r of sumR.rows)     summaries[String((r as any).month)]  = r as unknown as MonthlySummary;
+    for (const r of sumR.rows) summaries[String((r as any).month)] = r as unknown as MonthlySummary;
     allBills = billCfgR.rows as unknown as typeof allBills;
     for (const r of billPayR.rows as unknown as any[]) {
-      const m = r.month;
-      if (!billsByMonth[m]) billsByMonth[m] = [];
-      billsByMonth[m].push({ ...r, actual_amount: Number(r.paid_amount ?? 0) });
+      payByMonthBill[`${r.month}|${r.bill_id}`] = { amount: Number(r.amount), is_skipped: Number(r.is_skipped) };
     }
-    for (const r of ccR.rows  as unknown as CCCharge[])   { if (!ccByMonth[r.month])   ccByMonth[r.month]   = []; ccByMonth[r.month].push(r);   }
-    for (const r of cashR.rows as unknown as CashExpense[]){ if (!cashByMonth[r.month]) cashByMonth[r.month] = []; cashByMonth[r.month].push(r); }
+    for (const r of ccR.rows   as unknown as CCCharge[])   { if (!ccByMonth[r.month])   ccByMonth[r.month]   = []; ccByMonth[r.month].push(r);   }
+    for (const r of cashR.rows as unknown as CashExpense[]) { if (!cashByMonth[r.month]) cashByMonth[r.month] = []; cashByMonth[r.month].push(r); }
+    for (const r of ccVarR.rows as unknown as { month: string; total: number }[]) {
+      ccVarByMonth[r.month] = Number(r.total);
+    }
   } finally { client.close(); }
 
   function sumOf(month: string, key: keyof MonthlySummary): number {
     return Number(summaries[month]?.[key] ?? 0);
   }
-  function paidBillAmt(month: string, billId: string): number {
-    return (billsByMonth[month] ?? []).find((b:any) => b.bill_id === billId && b.is_paid)?.actual_amount ?? 0;
+  // Resolves a bill's amount for a month: payment override → monthly_target → 0. Skipped = 0.
+  function billAmt(month: string, billId: string): number {
+    const cfg = allBills.find(b => b.id === billId);
+    const pay = payByMonthBill[`${month}|${billId}`];
+    if (pay?.is_skipped) return 0;
+    return pay ? pay.amount : Number(cfg?.monthly_target ?? 0);
   }
   function ccTotal(month: string): number {
-    const recurring = (billsByMonth[month] ?? []).filter((b:any)=>b.is_cc&&b.is_paid).reduce((s:number,b:any)=>s+b.actual_amount,0);
-    const variable  = (ccByMonth[month] ?? []).reduce((s,c)=>s+c.amount,0);
-    return recurring + variable;
+    const variable     = ccVarByMonth[month] ?? 0;
+    const bigPurchases = (ccByMonth[month] ?? []).reduce((s, c) => s + c.amount, 0);
+    return variable + bigPurchases;
   }
 
   // Build rows
@@ -90,7 +96,7 @@ export async function GET(context: APIContext): Promise<Response> {
   rows.push(['Expenses', 'Date Due']);
   const checkingBills = allBills.filter(b => !b.is_cc_default);
   for (const bill of checkingBills) {
-    const vals = months.map(m => { const a = paidBillAmt(m, bill.id); return a ? -a : ''; });
+    const vals = months.map(m => { const a = billAmt(m, bill.id); return a ? -a : ''; });
     rows.push(dataRow(bill.name, bill.due_day ?? '', vals));
   }
   // CC payment line
@@ -102,11 +108,11 @@ export async function GET(context: APIContext): Promise<Response> {
   rows.push(['Recurring Bills', 'Date Due', 'Default']);
   const ccBillsCfg = allBills.filter(b => b.is_cc_default);
   for (const bill of ccBillsCfg) {
-    const vals = months.map(m => { const a = paidBillAmt(m, bill.id); return a ? -a : ''; });
+    const vals = months.map(m => { const a = billAmt(m, bill.id); return a ? -a : ''; });
     rows.push(dataRow(bill.name, bill.due_day ?? '', vals));
   }
   const ccRecTotals = months.map(m =>
-    -(billsByMonth[m] ?? []).filter((b:any)=>b.is_cc&&b.is_paid).reduce((s:number,b:any)=>s+b.actual_amount,0)
+    -ccBillsCfg.reduce((s, b) => s + billAmt(m, b.id), 0)
   );
   rows.push(dataRow('Total Recurring', '', ccRecTotals.map(v=>v||'')));
   rows.push([]);
@@ -134,7 +140,7 @@ export async function GET(context: APIContext): Promise<Response> {
   // Net
   const nets = months.map((m, i) => {
     const inc = incTotals[i];
-    const out = (billsByMonth[m]??[]).filter((b:any)=>!b.is_cc&&b.is_paid).reduce((s:number,b:any)=>s+b.actual_amount,0);
+    const out = checkingBills.reduce((s, b) => s + billAmt(m, b.id), 0);
     const cc  = ccTotal(m);
     return inc - out - cc;
   });
