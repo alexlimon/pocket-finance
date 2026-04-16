@@ -23,7 +23,7 @@ try {
     client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
     // All non-CC recurring bills (the defaults)
     client.execute({
-      sql: `SELECT id, name, monthly_target, is_cc_default FROM budget_config WHERE is_recurring = 1 AND is_cc_default = 0`,
+      sql: `SELECT id, name, monthly_target, is_cc_default, start_month, end_month FROM budget_config WHERE is_recurring = 1 AND is_cc_default = 0`,
       args: [],
     }),
     // All bill_payments for this year (paid or unpaid, but not skipped)
@@ -47,10 +47,12 @@ try {
   }
 
   // For each month in the year, resolve every recurring bill's amount
-  const configs = configRes.rows as unknown as { id: string; name: string; monthly_target: number | null; is_cc_default: number }[];
+  const configs = configRes.rows as unknown as { id: string; name: string; monthly_target: number | null; is_cc_default: number; start_month: string | null; end_month: string | null }[];
   for (const mo of months) {
     billsByMonth[mo] = configs
       .map(bc => {
+        if (bc.start_month && mo < bc.start_month) return null;
+        if (bc.end_month   && mo > bc.end_month)   return null;
         const pay = payMap.get(`${mo}|${bc.id}`);
         if (pay?.is_skipped) return null;
         const actual_amount = pay ? pay.amount : Number(bc.monthly_target ?? 0);

@@ -2,7 +2,7 @@ import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient } from '../../../lib/db';
 import * as XLSX from 'xlsx';
-import type { MonthlySummary, BillRow, CCCharge, CashExpense } from '../../../lib/budget';
+import type { MonthlySummary, CCCharge, CashExpense } from '../../../lib/budget';
 
 export async function GET(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -20,12 +20,12 @@ export async function GET(context: APIContext): Promise<Response> {
   let ccByMonth:    Record<string, CCCharge[]>    = {};
   let cashByMonth:  Record<string, CashExpense[]> = {};
   let ccVarByMonth: Record<string, number>        = {};
-  let allBills:     { id: string; name: string; monthly_target: number | null; is_cc_default: number; due_day: number | null }[] = [];
+  let allBills:     { id: string; name: string; monthly_target: number | null; is_cc_default: number; due_day: number | null; start_month: string | null; end_month: string | null }[] = [];
 
   try {
     const [sumR, billCfgR, billPayR, ccR, cashR, ccVarR] = await Promise.all([
       client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
-      client.execute({ sql: `SELECT id, name, monthly_target, is_cc_default, due_day FROM budget_config WHERE is_recurring = 1 ORDER BY is_cc_default, name` }),
+      client.execute({ sql: `SELECT id, name, monthly_target, is_cc_default, due_day, start_month, end_month FROM budget_config WHERE is_recurring = 1 ORDER BY is_cc_default, name`, args: [] }),
       client.execute({
         sql: `SELECT bill_id, month, amount, is_skipped FROM bill_payments WHERE month LIKE ?`,
         args: [`${year}-%`],
@@ -53,8 +53,10 @@ export async function GET(context: APIContext): Promise<Response> {
   // Resolves a bill's amount for a month: payment override → monthly_target → 0. Skipped = 0.
   function billAmt(month: string, billId: string): number {
     const cfg = allBills.find(b => b.id === billId);
+    if (cfg?.start_month && month < cfg.start_month) return 0;
+    if (cfg?.end_month   && month > cfg.end_month)   return 0;
     const pay = payByMonthBill[`${month}|${billId}`];
-    if (pay?.is_skipped) return 0;
+    if (pay?.is_skipped === 1) return 0;
     return pay ? pay.amount : Number(cfg?.monthly_target ?? 0);
   }
   function ccTotal(month: string): number {
@@ -69,8 +71,9 @@ export async function GET(context: APIContext): Promise<Response> {
   rows.push(headerRow);
 
   function dataRow(label: string, due: string | number, vals: (number | '')[], total?: number): (string|number)[] {
-    const t = total ?? (vals as number[]).filter(v=>v!=='').reduce((a,b)=>a+b,0);
-    return [label, due, '', ...vals, t, '', vals.filter(v=>v!=='').length ? t / vals.filter(v=>v!=='').length : ''];
+    const nonEmpty = vals.filter((v): v is number => v !== '');
+    const t = total ?? nonEmpty.reduce((a, b) => a + b, 0);
+    return [label, due, '', ...vals, t, '', nonEmpty.length ? t / nonEmpty.length : ''];
   }
 
   // Bank accounts
@@ -158,11 +161,14 @@ export async function GET(context: APIContext): Promise<Response> {
   ];
 
   XLSX.utils.book_append_sheet(wb, ws, `${year} Budget`);
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  const buf  = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' }) as string;
+  const binary = atob(buf);
+  const bytes  = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes.buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 
-  return new Response(buf, {
+  return new Response(blob, {
     headers: {
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': `attachment; filename="Budget-${year}.xlsx"`,
     },
   });
