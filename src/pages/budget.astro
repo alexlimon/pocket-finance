@@ -283,7 +283,7 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
         <div class="flex items-center justify-between">
           <span class="text-stone-500">{lbl}</span>
           <span class="editable-field tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
-            data-field={field} data-month={month} data-endpoint="/api/budget/summary">{fmt(Number(val))}</span>
+            data-field={field} data-month={month} data-endpoint="/api/budget/summary" data-propagatable="1">{fmt(Number(val))}</span>
         </div>
       ))}
       {otherCashIncomes.length > 0 && otherCashIncomes.map(e => (
@@ -828,21 +828,55 @@ function bindInlineEdit(el: HTMLElement) {
     inp.type = 'number'; inp.step = '0.01'; inp.value = String(cur);
     inp.className = 'w-28 rounded border border-brand-green bg-white px-2 py-0.5 text-sm tabular-nums focus:outline-none';
     el.replaceWith(inp); inp.focus(); inp.select();
+    let saved = false;
     async function save() {
+      if (saved) return; saved = true;
       const v = parseFloat(inp.value);
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
-      if (!isNaN(v)) { 
-        await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{}); 
-        recomputeCC(); 
-         
+      if (!isNaN(v) && v !== cur) {
+        if (el.dataset.propagatable) showPropagateBtn(el, field, v);
+        await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{});
+        recomputeCC();
       }
     }
     inp.addEventListener('blur', save);
-    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){saved=true; el.textContent=usd(cur);inp.replaceWith(el);} });
   });
 }
 document.querySelectorAll<HTMLElement>('.editable-field').forEach(bindInlineEdit);
+
+// ── Propagate-forward button ──────────────────────────────────────────────────
+function showPropagateBtn(anchor: HTMLElement, field: string, value: number, billId?: string) {
+  // Remove any existing propagate button for this field
+  anchor.parentElement?.querySelector('.propagate-btn')?.remove();
+
+  const btn = document.createElement('button');
+  btn.className = 'propagate-btn ml-1 rounded border border-stone-300 px-1.5 py-0.5 text-xs text-stone-400 hover:border-brand-green hover:text-brand-green transition-colors';
+  btn.title = `Apply ${usd(value)} to all future months`;
+  btn.textContent = '→ future';
+
+  btn.addEventListener('click', async () => {
+    btn.textContent = '…';
+    btn.disabled = true;
+    try {
+      let res: { rows_updated: number };
+      if (billId) {
+        res = await api('/api/budget/bill-propagate', 'POST', { bill_id: billId, amount: value, from_month: MONTH }) as typeof res;
+      } else {
+        res = await api('/api/budget/summary-propagate', 'POST', { field, value, from_month: MONTH }) as typeof res;
+      }
+      btn.textContent = `✓ ${res.rows_updated} updated`;
+      btn.className = btn.className.replace('text-stone-400', 'text-brand-green').replace('border-stone-300', 'border-brand-green');
+      setTimeout(() => btn.remove(), 2000);
+    } catch {
+      btn.textContent = '→ future';
+      btn.disabled = false;
+    }
+  });
+
+  anchor.insertAdjacentElement('afterend', btn);
+}
 
 // ── Savings allocation edit ─────────────────────────────────────────────────
 // When user changes "Transfer to savings", update savings_after on backend
@@ -895,14 +929,20 @@ document.querySelectorAll<HTMLElement>('.editable-bill-amount').forEach(el => {
     inp.type='number'; inp.step='0.01'; inp.value=String(cur);
     inp.className='w-20 rounded border border-brand-green bg-white px-1.5 py-0.5 text-xs tabular-nums focus:outline-none';
     el.replaceWith(inp); inp.focus(); inp.select();
+    let saved = false;
     async function save() {
+      if (saved) return; saved = true;
       const v = parseFloat(inp.value);
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
-      if (!isNaN(v)) { await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{}); recomputeCC();  }
+      if (!isNaN(v)) {
+        if (v !== cur) showPropagateBtn(el, '__bill__', v, billId);
+        await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{});
+        recomputeCC();
+      }
     }
     inp.addEventListener('blur',save);
-    inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);} });
+    inp.addEventListener('keydown', e => { if(e.key==='Enter') save(); if(e.key==='Escape'){saved=true; el.textContent=usd(cur);inp.replaceWith(el);} });
   });
 });
 
