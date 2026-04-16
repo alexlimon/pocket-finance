@@ -224,100 +224,105 @@ export function buildSankey(params: {
   return { nodes, links, surplus };
 }
 
-// ── Purchase Impact Calculator (pure, client-safe) ───────────────────────────
+// ── Scenario Projector (pure, client-safe) ───────────────────────────────────
 
-export interface CashImpactResult {
-  kind:            'cash';
-  monthsToRecover: number;
-  recoverLabel:    string;   // 'Oct 2026'
-  newSafeToSpend:  number;
-  error?:          string;
+export type Scenario =
+  | { kind: 'recurring_expense'; label: string; amount: number; startMonth: string }
+  | { kind: 'one_time_purchase'; label: string; amount: number; month: string }
+  | { kind: 'income_change';     label: string; deltaPct: number; startMonth: string };
+
+export interface MonthProjection {
+  month:           string;   // 'YYYY-MM'
+  label:           string;   // 'May'
+  baseIncome:      number;
+  baseExpenses:    number;
+  baseNet:         number;   // income − expenses (pre-savings surplus)
+  scenarioIncome:  number;
+  scenarioExpenses:number;
+  scenarioNet:     number;
+  delta:           number;   // scenarioNet − baseNet
+  cumulativeDelta: number;   // running sum of delta
 }
 
-export interface FinanceImpactResult {
-  kind:             'finance';
-  monthsToPayOff:   number;
-  totalInterest:    number;
-  trueCost:         number;
-  newSafeToSpend:   number;
-  error?:           string;
+export interface ScenarioResult {
+  projections:       MonthProjection[];
+  totalDelta:        number;       // sum of all deltas
+  eoyBaseNet:        number;       // sum of baseNet for all projected months
+  eoyScenarioNet:    number;       // sum of scenarioNet
+  needsReserves:     boolean;      // does any month's cumulative delta push below zero?
+  reservesDraw:      number;       // max amount that would need to come from reserves
+  verdict:           'comfortable' | 'tight' | 'needs_reserves';
 }
 
-export type ImpactResult = CashImpactResult | FinanceImpactResult;
+/**
+ * Projects a what-if scenario across the remaining months of the year.
+ *
+ * Uses the current month's resolved budget as the repeating baseline:
+ *   baseNet = baseIncome − baseExpenses (this is the pre-savings surplus)
+ *
+ * The scenario modifies income or expenses for qualifying months, showing
+ * the month-by-month delta and whether reserves would need to be tapped.
+ */
+export function projectScenario(params: {
+  scenario:       Scenario;
+  baseIncome:     number;       // current month's total inflow (salary + other)
+  baseExpenses:   number;       // current month's total outflow (fixed + subs + variable)
+  remainingMonths: string[];    // ['2026-05', '2026-06', …, '2026-12']
+  currentSurplus: number;       // this month's surplus already banked (optional head start)
+}): ScenarioResult {
+  const { scenario, baseIncome, baseExpenses, remainingMonths, currentSurplus } = params;
+  const baseNet = baseIncome - baseExpenses;
 
-export function cashImpact(params: {
-  price:           number;
-  monthlyFreeFlow: number;
-  safeToSpendBase: number;
-  today?:          Date;
-}): CashImpactResult {
-  const { price, monthlyFreeFlow, safeToSpendBase, today = new Date() } = params;
+  const projections: MonthProjection[] = [];
+  let cumDelta = 0;
+  let minCumDelta = 0;
 
-  if (monthlyFreeFlow <= 0) {
-    return {
-      kind:            'cash',
-      monthsToRecover: Infinity,
-      recoverLabel:    '—',
-      newSafeToSpend:  safeToSpendBase - price,
-      error:           'Deficit baseline: cash purchase will deplete reserves without recovery.',
-    };
+  for (const m of remainingMonths) {
+    const [y, mo] = m.split('-').map(Number);
+    const label = new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'short' });
+
+    let sIncome   = baseIncome;
+    let sExpenses = baseExpenses;
+
+    if (scenario.kind === 'recurring_expense') {
+      if (m >= scenario.startMonth) sExpenses += scenario.amount;
+    } else if (scenario.kind === 'one_time_purchase') {
+      if (m === scenario.month) sExpenses += scenario.amount;
+    } else if (scenario.kind === 'income_change') {
+      if (m >= scenario.startMonth) {
+        const raise = baseIncome * (scenario.deltaPct / 100);
+        sIncome += raise;
+      }
+    }
+
+    const sNet  = sIncome - sExpenses;
+    const delta = sNet - baseNet;
+    cumDelta   += delta;
+    if (cumDelta < minCumDelta) minCumDelta = cumDelta;
+
+    projections.push({
+      month: m, label,
+      baseIncome, baseExpenses, baseNet,
+      scenarioIncome: sIncome, scenarioExpenses: sExpenses, scenarioNet: sNet,
+      delta, cumulativeDelta: cumDelta,
+    });
   }
 
-  const monthsToRecover = price / monthlyFreeFlow;
-  const recoverDate = new Date(today.getFullYear(), today.getMonth() + Math.ceil(monthsToRecover), 1);
-  const recoverLabel = recoverDate.toLocaleString('en-US', { month: 'short', year: 'numeric' });
+  const eoyBaseNet     = baseNet * remainingMonths.length;
+  const eoyScenarioNet = projections.reduce((s, p) => s + p.scenarioNet, 0);
+  const totalDelta     = eoyScenarioNet - eoyBaseNet;
 
-  return {
-    kind:            'cash',
-    monthsToRecover,
-    recoverLabel,
-    newSafeToSpend:  safeToSpendBase - price,
-  };
-}
+  // Does the cumulative hit ever exceed the current-month surplus?
+  // If so, the user would need to dip into reserves.
+  const needsReserves = (currentSurplus + minCumDelta) < 0;
+  const reservesDraw  = needsReserves ? Math.abs(currentSurplus + minCumDelta) : 0;
 
-export function financeImpact(params: {
-  price:           number;
-  aprPct:          number;
-  monthlyPayment:  number;
-  safeToSpendBase: number;
-}): FinanceImpactResult {
-  const { price, aprPct, monthlyPayment, safeToSpendBase } = params;
+  const verdict: ScenarioResult['verdict'] =
+    needsReserves ? 'needs_reserves'
+    : totalDelta < -baseNet ? 'tight'
+    : 'comfortable';
 
-  const monthlyRate = aprPct / 100 / 12;
-  const minViable   = price * monthlyRate;
-
-  if (monthlyPayment <= minViable) {
-    return {
-      kind:            'finance',
-      monthsToPayOff:  Infinity,
-      totalInterest:   Infinity,
-      trueCost:        Infinity,
-      newSafeToSpend:  safeToSpendBase - monthlyPayment,
-      error:           `Payment must exceed ${Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(minViable)}/mo to avoid negative amortization.`,
-    };
-  }
-
-  let balance = price;
-  let totalInterest = 0;
-  let months = 0;
-  const CAP = 600; // 50 years — guard against pathological inputs
-
-  while (balance > 0 && months < CAP) {
-    const interest  = balance * monthlyRate;
-    const principal = monthlyPayment - interest;
-    const applied   = Math.min(principal, balance);
-    balance        -= applied;
-    totalInterest  += Math.max(0, (applied === principal ? interest : monthlyPayment - applied));
-    months++;
-  }
-
-  return {
-    kind:            'finance',
-    monthsToPayOff:  months,
-    totalInterest,
-    trueCost:        price + totalInterest,
-    newSafeToSpend:  safeToSpendBase - monthlyPayment,
-  };
+  return { projections, totalDelta, eoyBaseNet, eoyScenarioNet, needsReserves, reservesDraw, verdict };
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
