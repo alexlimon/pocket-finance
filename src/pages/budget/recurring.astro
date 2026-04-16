@@ -48,17 +48,17 @@ function fmt(n: number) {
   </p>
 
   <!-- ── Recurring items table ── -->
-  <div class="rounded-xl border border-surface-border bg-surface-card overflow-hidden mb-8">
-    <table class="w-full text-sm">
+  <div class="rounded-xl border border-surface-border bg-surface-card mb-8 overflow-x-auto">
+    <table class="w-full text-sm" style="min-width:700px">
       <thead>
         <tr class="border-b border-surface-border text-left">
-          <th class="px-4 py-3 text-xs font-medium text-stone-400">Name</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400">Amount</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400 hidden sm:table-cell">Due</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400 hidden md:table-cell">Type</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400 hidden md:table-cell">Entity</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400">Start</th>
-          <th class="px-4 py-3 text-xs font-medium text-stone-400">End</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-48">Name</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-28">Amount</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-16">Due</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-28">Type</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-28">Entity</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-32">Start</th>
+          <th class="px-4 py-3 text-xs font-medium text-stone-400 w-32">End</th>
           <th class="px-4 py-3 text-xs font-medium text-stone-400 text-right">Actions</th>
         </tr>
       </thead>
@@ -71,36 +71,36 @@ function fmt(n: number) {
             <td class="px-4 py-2.5 tabular-nums">
               <span class="editable-amount text-stone-700 cursor-pointer hover:bg-surface-hover rounded px-1" data-id={item.id}>{fmt(item.monthly_target ?? 0)}</span>
             </td>
-            <td class="px-4 py-2.5 text-stone-500 hidden sm:table-cell">
-              <span class="editable-due cursor-pointer hover:bg-surface-hover rounded px-1" data-id={item.id}>
-                {item.due_day ? `${item.due_day}th` : '—'}
-              </span>
+            <td class="px-4 py-2.5">
+              <input type="date" class="due-date-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full"
+                data-id={item.id}
+                value={item.due_day ? `2000-01-${String(item.due_day).padStart(2,'0')}` : ''} />
             </td>
-            <td class="px-4 py-2.5 hidden md:table-cell">
+            <td class="px-4 py-2.5">
               <button class="toggle-cc rounded border border-surface-border px-2 py-0.5 text-xs hover:border-zinc-500"
                 data-id={item.id} data-cc={item.is_cc_default ? '1' : '0'}>
                 {item.is_cc_default ? 'Credit Card' : 'Checking'}
               </button>
             </td>
-            <td class="px-4 py-2.5 hidden md:table-cell">
-              <select class="entity-select rounded border border-surface-border bg-surface px-2 py-0.5 text-xs text-stone-600" data-id={item.id}>
+            <td class="px-4 py-2.5">
+              <select class="entity-select rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id={item.id}>
                 {['household','kirby','kennedy'].map(e => (
                   <option value={e} selected={item.entity_id === e}>{e.charAt(0).toUpperCase()+e.slice(1)}</option>
                 ))}
               </select>
             </td>
             <td class="px-4 py-2.5">
-              <input type="month" class="start-month-input rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-600 w-30"
-                data-id={item.id} value={item.start_month ?? ''} />
+              <input type="date" class="start-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full"
+                data-id={item.id} value={item.start_month ? `${item.start_month}-01` : ''} />
             </td>
             <td class="px-4 py-2.5">
-              <input type="month" class="end-month-input rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-600 w-30"
-                data-id={item.id} value={item.end_month ?? ''} />
+              <input type="date" class="end-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full"
+                data-id={item.id} value={item.end_month ? `${item.end_month}-01` : ''} />
             </td>
             <td class="px-4 py-2.5 text-right">
               <div class="flex items-center justify-end gap-2">
                 <button
-                  class="propagate-btn rounded-lg border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 text-xs text-brand-green hover:bg-brand-green/20 font-medium"
+                  class="propagate-btn rounded-lg border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 text-xs text-brand-green hover:bg-brand-green/20 font-medium whitespace-nowrap"
                   data-id={item.id}
                   title="Create payment records for all months in the date range"
                 >Propagate</button>
@@ -128,9 +128,9 @@ function fmt(n: number) {
           class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-stone-800 tabular-nums focus:border-brand-green focus:outline-none" />
       </div>
       <div>
-        <label class="block text-xs text-stone-400 mb-1">Due Day (1–31)</label>
-        <input name="due_day" type="number" min="1" max="31" placeholder="e.g. 15"
-          class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-stone-800 tabular-nums focus:border-brand-green focus:outline-none" />
+        <label class="block text-xs text-stone-400 mb-1">Due Date</label>
+        <input name="due_date" type="date"
+          class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-stone-600 focus:border-brand-green focus:outline-none" />
       </div>
       <div>
         <label class="block text-xs text-stone-400 mb-1">Paid via</label>
@@ -150,13 +150,13 @@ function fmt(n: number) {
         </select>
       </div>
       <div>
-        <label class="block text-xs text-stone-400 mb-1">Start Month</label>
-        <input name="start_month" type="month"
+        <label class="block text-xs text-stone-400 mb-1">Start Date</label>
+        <input name="start_date" type="date"
           class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-stone-600 focus:border-brand-green focus:outline-none" />
       </div>
       <div>
-        <label class="block text-xs text-stone-400 mb-1">End Month</label>
-        <input name="end_month" type="month"
+        <label class="block text-xs text-stone-400 mb-1">End Date</label>
+        <input name="end_date" type="date"
           class="w-full rounded-lg border border-surface-border bg-surface px-3 py-2 text-sm text-stone-600 focus:border-brand-green focus:outline-none" />
       </div>
       <div class="col-span-2 sm:col-span-3 lg:col-span-4 flex items-center gap-3 mt-1">
@@ -217,22 +217,11 @@ document.querySelectorAll<HTMLElement>('.editable-amount').forEach(el => {
   });
 });
 
-// ── Inline due day edit ──────────────────────────────────────────────────────
-document.querySelectorAll<HTMLElement>('.editable-due').forEach(el => {
-  el.addEventListener('click', () => {
-    const id = el.dataset.id!; const cur = parseInt(el.textContent!)||0;
-    const inp = document.createElement('input');
-    inp.type='number'; inp.min='1'; inp.max='31'; inp.value=cur?String(cur):'';
-    inp.className='rounded border border-brand-green bg-surface px-1 py-0 text-xs focus:outline-none w-10';
-    el.replaceWith(inp); inp.focus(); inp.select();
-    async function save() {
-      const v = parseInt(inp.value);
-      el.textContent = isNaN(v)?'—':`${v}th`;
-      inp.replaceWith(el);
-      if (!isNaN(v)) await api('/api/budget/recurring','PATCH',{id,due_day:v}).catch(()=>{});
-    }
-    inp.addEventListener('blur',save);
-    inp.addEventListener('keydown',e=>{if(e.key==='Enter')save();if(e.key==='Escape')inp.replaceWith(el);});
+// ── Due date input (extracts day number) ─────────────────────────────────────
+document.querySelectorAll<HTMLInputElement>('.due-date-input').forEach(inp => {
+  inp.addEventListener('change', async () => {
+    const day = inp.value ? new Date(inp.value + 'T12:00:00').getDate() : null;
+    await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,due_day:day}).catch(()=>{});
   });
 });
 
@@ -253,11 +242,12 @@ document.querySelectorAll<HTMLSelectElement>('.entity-select').forEach(sel => {
   });
 });
 
-// ── Start/end month inputs ────────────────────────────────────────────────────
+// ── Start/end date inputs (store YYYY-MM extracted from full date) ────────────
 document.querySelectorAll<HTMLInputElement>('.start-month-input, .end-month-input').forEach(inp => {
   const field = inp.classList.contains('start-month-input') ? 'start_month' : 'end_month';
   inp.addEventListener('change', async () => {
-    await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,[field]:inp.value||null}).catch(()=>{});
+    const ym = inp.value ? inp.value.slice(0, 7) : null; // extract YYYY-MM
+    await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,[field]:ym}).catch(()=>{});
   });
 });
 
@@ -268,12 +258,13 @@ document.querySelectorAll<HTMLButtonElement>('.propagate-btn').forEach(btn => {
     const row = btn.closest('tr') as HTMLTableRowElement;
     const startInput = row.querySelector<HTMLInputElement>('.start-month-input');
     const endInput   = row.querySelector<HTMLInputElement>('.end-month-input');
-    const start = startInput?.value; const end = endInput?.value;
+    const start = startInput?.value?.slice(0, 7);
+    const end   = endInput?.value?.slice(0, 7);
     if (!start || !end) {
-      alert('Set a Start Month and End Month first, then click Propagate.');
+      alert('Set a Start Date and End Date first, then click Propagate.');
       return;
     }
-    if (start > end) { alert('Start month must be before end month.'); return; }
+    if (start > end) { alert('Start date must be before end date.'); return; }
     btn.disabled = true; btn.textContent = '…';
     try {
       const res = await api('/api/budget/propagate','POST',{bill_id:id,start_month:start,end_month:end}) as {months_created:number};
@@ -302,11 +293,11 @@ document.getElementById('add-recurring-form')?.addEventListener('submit', async 
   const body = {
     name:        String(data.get('name')||'').trim(),
     amount:      parseFloat(String(data.get('amount')||'0')),
-    due_day:     parseInt(String(data.get('due_day')||''))||undefined,
+    due_day:     (() => { const d = String(data.get('due_date')||''); return d ? new Date(d+'T12:00:00').getDate() : undefined; })(),
     is_cc:       String(data.get('is_cc')) === '1',
     entity_id:   String(data.get('entity_id')),
-    start_month: String(data.get('start_month')||'')||undefined,
-    end_month:   String(data.get('end_month')||'')||undefined,
+    start_month: String(data.get('start_date')||'').slice(0,7)||undefined,
+    end_month:   String(data.get('end_date')||'').slice(0,7)||undefined,
   };
   if (!body.name || isNaN(body.amount)) return;
   try {
@@ -319,20 +310,20 @@ document.getElementById('add-recurring-form')?.addEventListener('submit', async 
     tr.innerHTML = `
       <td class="px-4 py-2.5"><span class="editable-name text-stone-700 cursor-pointer hover:bg-surface-hover rounded px-1" data-id="${res.id}">${body.name}</span></td>
       <td class="px-4 py-2.5 tabular-nums"><span class="editable-amount text-stone-700 cursor-pointer hover:bg-surface-hover rounded px-1" data-id="${res.id}">${usd(body.amount)}</span></td>
-      <td class="px-4 py-2.5 text-stone-500 hidden sm:table-cell"><span class="editable-due cursor-pointer hover:bg-surface-hover rounded px-1" data-id="${res.id}">${body.due_day?body.due_day+'th':'—'}</span></td>
-      <td class="px-4 py-2.5 hidden md:table-cell"><button class="toggle-cc rounded border border-surface-border px-2 py-0.5 text-xs hover:border-zinc-500" data-id="${res.id}" data-cc="${body.is_cc?'1':'0'}">${body.is_cc?'Credit Card':'Checking'}</button></td>
-      <td class="px-4 py-2.5 hidden md:table-cell"><select class="entity-select rounded border border-surface-border bg-surface px-2 py-0.5 text-xs text-stone-600" data-id="${res.id}"><option value="household"${body.entity_id==='household'?' selected':''}>Household</option><option value="kirby"${body.entity_id==='kirby'?' selected':''}>Kirby</option><option value="kennedy"${body.entity_id==='kennedy'?' selected':''}>Kennedy</option></select></td>
-      <td class="px-4 py-2.5"><input type="month" class="start-month-input rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-600 w-30" data-id="${res.id}" value="${body.start_month??''}" /></td>
-      <td class="px-4 py-2.5"><input type="month" class="end-month-input rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-600 w-30" data-id="${res.id}" value="${body.end_month??''}" /></td>
+      <td class="px-4 py-2.5"><input type="date" class="due-date-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}" value="${body.due_day?`2000-01-${String(body.due_day).padStart(2,'0')}`:''}" /></td>
+      <td class="px-4 py-2.5"><button class="toggle-cc rounded border border-surface-border px-2 py-0.5 text-xs hover:border-zinc-500" data-id="${res.id}" data-cc="${body.is_cc?'1':'0'}">${body.is_cc?'Credit Card':'Checking'}</button></td>
+      <td class="px-4 py-2.5"><select class="entity-select rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}"><option value="household"${body.entity_id==='household'?' selected':''}>Household</option><option value="kirby"${body.entity_id==='kirby'?' selected':''}>Kirby</option><option value="kennedy"${body.entity_id==='kennedy'?' selected':''}>Kennedy</option></select></td>
+      <td class="px-4 py-2.5"><input type="date" class="start-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}" value="${body.start_month?body.start_month+'-01':''}" /></td>
+      <td class="px-4 py-2.5"><input type="date" class="end-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}" value="${body.end_month?body.end_month+'-01':''}" /></td>
       <td class="px-4 py-2.5 text-right"><div class="flex items-center justify-end gap-2"><button class="propagate-btn rounded-lg border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 text-xs text-brand-green hover:bg-brand-green/20 font-medium" data-id="${res.id}">Propagate</button><button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button></div></td>
     `;
     tbody.appendChild(tr);
     form.reset();
     // Re-bind events on new row (simplified - reload for full functionality)
     tr.querySelector('.propagate-btn')?.addEventListener('click', async () => {
-      const start = (tr.querySelector('.start-month-input') as HTMLInputElement)?.value;
-      const end   = (tr.querySelector('.end-month-input')   as HTMLInputElement)?.value;
-      if (!start||!end) { alert('Set start and end months first.'); return; }
+      const start = (tr.querySelector('.start-month-input') as HTMLInputElement)?.value?.slice(0,7);
+      const end   = (tr.querySelector('.end-month-input')   as HTMLInputElement)?.value?.slice(0,7);
+      if (!start||!end) { alert('Set start and end dates first.'); return; }
       const r = await api('/api/budget/propagate','POST',{bill_id:res.id,start_month:start,end_month:end}) as {months_created:number};
       alert(`✓ Created records for ${r.months_created} months.`);
     });

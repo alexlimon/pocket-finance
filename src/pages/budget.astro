@@ -45,15 +45,16 @@ const BILLS_SELECT = `
          COALESCE(bp.is_skipped, 0) as is_skipped
   FROM budget_config bc
   LEFT JOIN bill_payments bp ON bc.id = bp.bill_id AND bp.month = ?`;
-const BILLS_QUERY    = BILLS_SELECT + ` WHERE bc.is_recurring = 1 ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`;
-const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1 ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`;
+const MONTH_FILTER   = ` AND (bc.start_month IS NULL OR bc.start_month <= ?) AND (bc.end_month IS NULL OR bc.end_month >= ?)`;
+const BILLS_QUERY    = BILLS_SELECT + ` WHERE bc.is_recurring = 1` + MONTH_FILTER + ` ORDER BY bc.is_cc_default ASC, bc.due_day ASC NULLS LAST, bc.name ASC`;
+const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_default = 1` + MONTH_FILTER + ` ORDER BY bc.due_day ASC NULLS LAST, bc.name ASC`;
 
 let savedRecurringMode: 'estimated' | 'actual' | null = null;
 
 try {
   const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes] = await Promise.all([
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
-    client.execute({ sql: BILLS_QUERY, args: [month] }),
+    client.execute({ sql: BILLS_QUERY, args: [month, month, month] }),
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
     client.execute({
       sql: `SELECT cc.*, cs.billing_end_day, cs.payment_day
@@ -71,7 +72,7 @@ try {
     // Next month — its cc_budget is THIS month's CC spending budget (payment-month convention)
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] }),
     // Next month CC bills — subs charged this cycle are tracked in next month's bill_payments
-    client.execute({ sql: CC_BILLS_QUERY, args: [next] }),
+    client.execute({ sql: CC_BILLS_QUERY, args: [next, next, next] }),
     // Saved est/actual toggle for this month
     client.execute({ sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] }),
   ]);

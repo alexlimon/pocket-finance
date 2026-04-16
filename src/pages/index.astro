@@ -4,134 +4,386 @@ import ImpactCalculator from '../components/ImpactCalculator';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import {
-  totalCash,
-  totalCreditDebt,
-  netCash,
-  avgMonthlyBurn,
-  monthlyIncome,
-  eoyProjection,
-  formatCurrency,
-  type AccountRow,
-  type TransactionRow,
-  type IncomeRow,
-} from '../lib/finance';
+  aggregateMonth, safeToSpend, baselineRatio, burnLine, buildSankey,
+  fmtCurrency, fmtPct,
+  type BillAggRow, type VariableSpendRow, type MonthAggregate,
+} from '../lib/insights';
+import { currentMonth, prevMonth, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
 
-// ── Auth guard ────────────────────────────────────────────────────────────────
+// ── Auth ──────────────────────────────────────────────────────────────────────
 const env = Astro.locals.runtime.env;
-if (!(await verifySession(Astro.request, env))) {
-  return Astro.redirect('/login');
-}
+if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
 
-// ── Data fetching ─────────────────────────────────────────────────────────────
+// ── 12-month window ──────────────────────────────────────────────────────────
+const thisMonth = currentMonth();
+const months: string[] = [];
+{
+  let m = thisMonth;
+  for (let i = 0; i < 12; i++) { months.unshift(m); m = prevMonth(m); }
+}
+const startMonth = months[0];
+
+// ── Fetch ────────────────────────────────────────────────────────────────────
 const client = getClient(env);
-let accounts:     AccountRow[]     = [];
-let transactions: TransactionRow[] = [];
-let incomes:      IncomeRow[]      = [];
+let summaries: MonthlySummary[]   = [];
+let billRows: (BillAggRow & { bill_id: string })[] = [];
+let varSpend: VariableSpendRow[]  = [];
+let bigCharges: CCCharge[]        = [];
+let cashRows: CashExpense[]       = [];
+let projRows: Array<{ id: string; monthly_target: number; is_cc_default: number }> = [];
 
 try {
-  const [acctRes, txnRes, incomeRes] = await Promise.all([
-    client.execute('SELECT * FROM accounts WHERE is_active = 1'),
-    client.execute(`
-      SELECT * FROM transactions
-      WHERE is_hidden = 0
-        AND date >= date('now', '-90 days')
-      ORDER BY date DESC
-      LIMIT 500
-    `),
-    client.execute('SELECT * FROM income_sources WHERE is_active = 1'),
+  const [sumRes, billRes, varRes, ccRes, cashRes, projRes] = await Promise.all([
+    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month >= ? ORDER BY month', args: [startMonth] }),
+    client.execute({
+      sql: `SELECT bp.month, bp.bill_id, bc.monthly_target, bp.amount as paid_amount,
+                   bp.is_paid, bc.is_cc_default, bp.is_skipped
+            FROM bill_payments bp
+            JOIN budget_config bc ON bc.id = bp.bill_id
+            WHERE bp.month >= ?`,
+      args: [startMonth],
+    }),
+    client.execute({ sql: 'SELECT month, card, amount FROM cc_variable_spend WHERE month >= ?', args: [startMonth] }),
+    client.execute({ sql: 'SELECT * FROM cc_charges WHERE month >= ? AND is_big_purchase = 1', args: [startMonth] }),
+    client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month >= ?', args: [startMonth] }),
+    client.execute('SELECT id, monthly_target, is_cc_default FROM budget_config WHERE is_recurring = 1'),
   ]);
 
-  accounts     = acctRes.rows     as unknown as AccountRow[];
-  transactions = txnRes.rows      as unknown as TransactionRow[];
-  incomes      = incomeRes.rows   as unknown as IncomeRow[];
+  summaries  = sumRes.rows  as unknown as MonthlySummary[];
+  billRows   = billRes.rows as unknown as (BillAggRow & { bill_id: string })[];
+  varSpend   = varRes.rows  as unknown as VariableSpendRow[];
+  bigCharges = ccRes.rows   as unknown as CCCharge[];
+  cashRows   = cashRes.rows as unknown as CashExpense[];
+  projRows   = projRes.rows as unknown as typeof projRows;
 } finally {
   client.close();
 }
 
-// ── Metrics ───────────────────────────────────────────────────────────────────
-const cash         = totalCash(accounts);
-const debt         = totalCreditDebt(accounts);
-const net          = netCash(accounts);
-const savings      = accounts.filter(a => a.type === 'savings').reduce((s, a) => s + (a.current_balance ?? 0), 0);
-const checking     = accounts.filter(a => a.type === 'checking').reduce((s, a) => s + (a.current_balance ?? 0), 0);
-const projection   = eoyProjection({ accounts, transactions, incomeSources: incomes });
+// ── Group by month ───────────────────────────────────────────────────────────
+function byMonth<T extends { month: string }>(rows: T[]): Record<string, T[]> {
+  const out: Record<string, T[]> = {};
+  for (const r of rows) (out[r.month] ??= []).push(r);
+  return out;
+}
+
+const sumMap   = new Map(summaries.map(s => [s.month, s]));
+const billsByM = byMonth(billRows);
+const varByM   = byMonth(varSpend);
+const bigByM   = byMonth(bigCharges as unknown as { month: string }[]) as unknown as Record<string, CCCharge[]>;
+const cashByM  = byMonth(cashRows);
+
+// Project unpaid recurring bills for the current month so Safe-to-Spend reflects
+// commitments, not just recorded payments.
+const currentBills: BillAggRow[] = [...(billsByM[thisMonth] ?? [])];
+const recordedIds = new Set((billsByM[thisMonth] ?? []).map(b => (b as any).bill_id));
+for (const p of projRows) {
+  if (!recordedIds.has(p.id) && (p.monthly_target ?? 0) > 0) {
+    currentBills.push({
+      month:          thisMonth,
+      monthly_target: p.monthly_target,
+      paid_amount:    null,
+      is_paid:        0,
+      is_cc_default:  p.is_cc_default,
+      is_skipped:     0,
+    });
+  }
+}
+
+// ── Per-month aggregates ─────────────────────────────────────────────────────
+const aggregates: MonthAggregate[] = months.map(m => aggregateMonth({
+  month:         m,
+  summary:       sumMap.get(m) ?? null,
+  bills:         m === thisMonth ? currentBills : (billsByM[m] ?? []),
+  variableSpend: varByM[m] ?? [],
+  bigPurchases:  bigByM[m] ?? [],
+  cashExpenses:  cashByM[m] ?? [],
+}));
+
+const currentAgg = aggregates[aggregates.length - 1];
+const currentSummary = sumMap.get(thisMonth);
+const savingsGoal = currentSummary
+  ? Math.max(0, Number(currentSummary.savings_after) - Number(currentSummary.savings_before))
+  : 0;
+const ccMtd = (varByM[thisMonth] ?? []).reduce((s, v) => s + v.amount, 0)
+            + (bigByM[thisMonth] ?? []).reduce((s, c) => s + c.amount, 0);
+
+const sts      = safeToSpend({ agg: currentAgg, savingsGoal, ccMtd });
+const baseline = baselineRatio(currentAgg);
+const burn     = burnLine(aggregates);
+const sankey   = buildSankey({ agg: currentAgg, savingsGoal });
+
+// ── Balance snapshot (from monthly_summary since Plaid may not be live) ──────
+const checking = currentSummary ? Number(currentSummary.checking_before) : 0;
+const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
+const ccDebt   = ccMtd;  // running card balance this month
+const net      = checking + savings - ccDebt;
+
+// Free cash flow: avg of last 3 complete months' net (excluding current month)
+const recent3    = aggregates.slice(-4, -1);
+const recentNet  = recent3.length ? recent3.reduce((s, a) => s + a.net, 0) / recent3.length : currentAgg.net;
+
+// ── Sparkline geometry ───────────────────────────────────────────────────────
+const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
+const allVals = burn.flatMap(p => [p.inflow, p.outflow]);
+const minV    = Math.min(0, ...allVals);
+const maxV    = Math.max(1, ...allVals);
+const toX = (i: number) => PAD_X + (i / Math.max(burn.length - 1, 1)) * (W - PAD_X * 2);
+const toY = (v: number) => PAD_Y + (1 - (v - minV) / (maxV - minV)) * (H - PAD_Y * 2);
+const inflowPath  = burn.map((p, i) => `${toX(i)},${toY(p.inflow)}`).join(' ');
+const outflowPath = burn.map((p, i) => `${toX(i)},${toY(p.outflow)}`).join(' ');
+
+// ── Sankey geometry ──────────────────────────────────────────────────────────
+const SW = 560, SH = 240, SPAD = 16;
+const sourceNodes = sankey.nodes.filter(n => n.kind === 'source');
+const targetNodes = sankey.nodes.filter(n => n.kind === 'target');
+const nodeSum = (id: string) => sankey.links
+  .filter(l => l.source === id || l.target === id)
+  .reduce((s, l) => s + l.value, 0);
+const totalFlow = sankey.links.reduce((s, l) => s + l.value, 0) || 1;
+
+type NodeBox = { id: string; label: string; x: number; y: number; h: number };
+function layoutColumn(nodes: typeof sankey.nodes, x: number): NodeBox[] {
+  const total = nodes.reduce((s, n) => s + nodeSum(n.id), 0) || 1;
+  const gap = 8;
+  const availH = SH - SPAD * 2 - gap * Math.max(0, nodes.length - 1);
+  let y = SPAD;
+  return nodes.map(n => {
+    const h = Math.max(14, (nodeSum(n.id) / total) * availH);
+    const box = { id: n.id, label: n.label, x, y, h };
+    y += h + gap;
+    return box;
+  });
+}
+const leftBoxes  = layoutColumn(sourceNodes, SPAD);
+const rightBoxes = layoutColumn(targetNodes, SW - SPAD - 90);
+
+// Compute link paths — each link is a cubic Bezier between source/target bands.
+type LinkPath = { d: string; thickness: number; sourceId: string };
+const linkPaths: LinkPath[] = [];
+const srcCursor: Record<string, number> = {};
+const tgtCursor: Record<string, number> = {};
+for (const l of sankey.links) {
+  const s = leftBoxes.find(b => b.id === l.source);
+  const t = rightBoxes.find(b => b.id === l.target);
+  if (!s || !t) continue;
+  const srcTotal = nodeSum(l.source);
+  const tgtTotal = nodeSum(l.target);
+  const sTh = (l.value / srcTotal) * s.h;
+  const tTh = (l.value / tgtTotal) * t.h;
+  const sy = s.y + (srcCursor[l.source] ?? 0) + sTh / 2;
+  const ty = t.y + (tgtCursor[l.target] ?? 0) + tTh / 2;
+  srcCursor[l.source] = (srcCursor[l.source] ?? 0) + sTh;
+  tgtCursor[l.target] = (tgtCursor[l.target] ?? 0) + tTh;
+  const sx = s.x + 90;
+  const tx = t.x;
+  const mx = (sx + tx) / 2;
+  linkPaths.push({
+    d: `M ${sx} ${sy} C ${mx} ${sy}, ${mx} ${ty}, ${tx} ${ty}`,
+    thickness: Math.max(1, (sTh + tTh) / 2),
+    sourceId: l.source,
+  });
+}
+
+const sourceColor: Record<string, string> = {
+  src_salary:   '#65a30d',
+  src_other:    '#84cc16',
+  src_reserves: '#dc626d',
+};
+const targetColor: Record<string, string> = {
+  tgt_fixed:    '#60a5fa',
+  tgt_subs:     '#a78bfa',
+  tgt_variable: '#f59e0b',
+  tgt_savings:  '#10b981',
+  tgt_surplus:  '#65a30d',
+  tgt_deficit:  '#dc626d',
+};
 
 const today = new Date();
 const monthName = today.toLocaleString('en-US', { month: 'long' });
+
+const stsColor =
+  sts.state === 'deficit' ? 'text-brand-red'
+  : sts.state === 'tight' ? 'text-brand-yellow'
+  : 'text-brand-green';
+const baseColor =
+  baseline.band === 'rigid'    ? 'text-brand-red'
+  : baseline.band === 'moderate' ? 'text-brand-yellow'
+  : 'text-brand-green';
+const baseLabel =
+  baseline.band === 'rigid'    ? 'Rigid — vulnerable to income shock'
+  : baseline.band === 'moderate' ? 'Moderate'
+  : 'Healthy';
 ---
 
-<Layout title="Dashboard">
-  <!-- ── Header ── -->
+<Layout title="Dashboard" wide>
   <div class="mb-6">
-    <h1 class="text-xl font-semibold text-stone-800">
-      {monthName} {today.getFullYear()}
-    </h1>
-    <p class="text-sm text-stone-400">Financial overview</p>
+    <h1 class="text-xl font-semibold text-stone-800">{monthName} {today.getFullYear()}</h1>
+    <p class="text-sm text-stone-400">Macro financial overview</p>
   </div>
 
-  <!-- ── Current Position ── -->
-  <div class="mb-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+  <!-- ── Safe to Spend hero ── -->
+  <div class={`mb-6 rounded-xl border-2 p-5 ${
+    sts.state === 'deficit' ? 'border-brand-red/40 bg-brand-red/5'
+    : sts.state === 'tight' ? 'border-brand-yellow/40 bg-brand-yellow/5'
+    : 'border-brand-green/30 bg-surface-card'
+  }`}>
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <p class="text-xs uppercase tracking-wide text-stone-500">Safe to Spend — {monthName}</p>
+        <p class={`mt-1 text-4xl font-bold tabular-nums ${stsColor}`}>{fmtCurrency(sts.amount)}</p>
+        {sts.state === 'deficit' ? (
+          <p class="mt-1 text-xs text-brand-red">Critical deficit — spending will pull from reserves.</p>
+        ) : sts.state === 'tight' ? (
+          <p class="mt-1 text-xs text-brand-yellow">Tight month — buffer is thin.</p>
+        ) : (
+          <p class="mt-1 text-xs text-stone-400">Remaining allowance after commitments.</p>
+        )}
+      </div>
+      <div class="text-right text-xs tabular-nums text-stone-500 space-y-0.5">
+        <div>Inflow: <span class="text-stone-700">{fmtCurrency(sts.inflow)}</span></div>
+        <div>− Fixed + Subs: <span class="text-stone-700">{fmtCurrency(sts.fixed)}</span></div>
+        <div>− Savings goal: <span class="text-stone-700">{fmtCurrency(sts.savingsGoal)}</span></div>
+        <div>− CC month-to-date: <span class="text-stone-700">{fmtCurrency(sts.ccMtd)}</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Balances ── -->
+  <div class="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
       <p class="text-xs text-stone-400">Checking</p>
-      <p class="mt-1 text-xl font-semibold tabular-nums text-brand-green">{formatCurrency(checking)}</p>
+      <p class="mt-1 text-lg font-semibold tabular-nums text-brand-green">{fmtCurrency(checking)}</p>
     </div>
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
       <p class="text-xs text-stone-400">Savings</p>
-      <p class="mt-1 text-xl font-semibold tabular-nums text-brand-green">{formatCurrency(savings)}</p>
+      <p class="mt-1 text-lg font-semibold tabular-nums text-brand-green">{fmtCurrency(savings)}</p>
     </div>
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
-      <p class="text-xs text-stone-400">Credit Card Debt</p>
-      <p class={`mt-1 text-xl font-semibold tabular-nums ${debt > 0 ? 'text-brand-red' : 'text-stone-500'}`}>
-        {formatCurrency(debt)}
+      <p class="text-xs text-stone-400">CC Balance (MTD)</p>
+      <p class={`mt-1 text-lg font-semibold tabular-nums ${ccDebt > 0 ? 'text-brand-red' : 'text-stone-500'}`}>
+        {fmtCurrency(ccDebt)}
       </p>
     </div>
     <div class="rounded-xl border border-surface-border bg-surface-card p-4">
       <p class="text-xs text-stone-400">Net Position</p>
-      <p class={`mt-1 text-xl font-semibold tabular-nums ${net >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
-        {formatCurrency(net)}
+      <p class={`mt-1 text-lg font-semibold tabular-nums ${net >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
+        {fmtCurrency(net)}
       </p>
     </div>
   </div>
 
-  <!-- ── EOY Projection ── -->
-  <div class="mb-6 rounded-xl border-2 border-brand-green/30 bg-surface-card p-5">
-    <h2 class="mb-4 text-sm font-semibold uppercase tracking-wide text-stone-600">End of Year Projection</h2>
-    <div class="grid grid-cols-2 gap-4 sm:grid-cols-4 mb-4">
-      <div>
-        <p class="text-xs text-stone-400">Current Total Cash</p>
-        <p class="mt-1 text-lg font-semibold tabular-nums text-stone-800">{formatCurrency(cash)}</p>
+  <!-- ── Structural Baseline + 12mo burn ── -->
+  <div class="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+    <div class="rounded-xl border border-surface-border bg-surface-card p-5 lg:col-span-1">
+      <p class="text-xs uppercase tracking-wide text-stone-500">Structural Baseline</p>
+      <p class={`mt-2 text-4xl font-bold tabular-nums ${baseColor}`}>{fmtPct(baseline.ratio)}</p>
+      <p class="mt-1 text-xs text-stone-500">{baseLabel}</p>
+
+      <div class="mt-4 h-2 w-full overflow-hidden rounded-full bg-stone-200">
+        <div
+          class={`h-full ${
+            baseline.band === 'rigid'    ? 'bg-brand-red'
+            : baseline.band === 'moderate' ? 'bg-brand-yellow'
+            : 'bg-brand-green'
+          }`}
+          style={`width: ${Math.min(100, baseline.ratio * 100)}%`}
+        />
       </div>
-      <div>
-        <p class="text-xs text-stone-400">Avg Monthly Net</p>
-        <p class={`mt-1 text-lg font-semibold tabular-nums ${projection.avgMonthlyNet >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
-          {formatCurrency(projection.avgMonthlyNet, { sign: true, compact: true })}
-        </p>
-      </div>
-      <div>
-        <p class="text-xs text-stone-400">Months Remaining</p>
-        <p class="mt-1 text-lg font-semibold tabular-nums text-stone-800">{projection.monthsRemaining}</p>
-      </div>
-      <div>
-        <p class="text-xs text-stone-400">Projected EOY Balance</p>
-        <p class={`mt-1 text-lg font-semibold tabular-nums ${projection.projectedBalance >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
-          {formatCurrency(projection.projectedBalance)}
-        </p>
+
+      <div class="mt-4 space-y-1 text-xs text-stone-500 tabular-nums">
+        <div class="flex justify-between"><span>Fixed outflow</span><span class="text-stone-700">{fmtCurrency(baseline.fixed)}</span></div>
+        <div class="flex justify-between"><span>Subscriptions</span><span class="text-stone-700">{fmtCurrency(baseline.subs)}</span></div>
+        <div class="flex justify-between"><span>Inflow</span><span class="text-stone-700">{fmtCurrency(baseline.inflow)}</span></div>
       </div>
     </div>
-    <p class="text-xs text-stone-400">
-      Based on {formatCurrency(cash)} current cash + {formatCurrency(projection.avgMonthlyNet, { sign: true })} avg net/mo × {projection.monthsRemaining} months remaining.
-    </p>
+
+    <div class="rounded-xl border border-surface-border bg-surface-card p-5 lg:col-span-2">
+      <div class="flex items-center justify-between">
+        <p class="text-xs uppercase tracking-wide text-stone-500">12-Month Burn</p>
+        <div class="flex gap-3 text-[10px] text-stone-400">
+          <span class="flex items-center gap-1"><span class="h-0.5 w-3 bg-brand-green" />Inflow</span>
+          <span class="flex items-center gap-1"><span class="h-0.5 w-3 bg-brand-red" />Outflow</span>
+          <span class="flex items-center gap-1"><span class="h-2 w-2 rounded-full bg-brand-red" />Anomaly</span>
+        </div>
+      </div>
+
+      <svg viewBox={`0 0 ${W} ${H}`} class="mt-3 w-full" aria-label="12 month burn chart">
+        {minV < 0 && maxV > 0 && (
+          <line x1={PAD_X} x2={W - PAD_X} y1={toY(0)} y2={toY(0)} stroke="#e4dbd0" stroke-width="1" stroke-dasharray="2 2" />
+        )}
+        <polyline points={inflowPath}  fill="none" stroke="#65a30d" stroke-width="1.5" stroke-linejoin="round" />
+        <polyline points={outflowPath} fill="none" stroke="#dc626d" stroke-width="1.5" stroke-linejoin="round" />
+        {burn.map((p, i) => p.anomaly && (
+          <circle cx={toX(i)} cy={toY(p.outflow)} r="3" fill="#dc626d" stroke="#fff" stroke-width="1" />
+        ))}
+      </svg>
+
+      <div class="mt-2 flex justify-between text-[10px] text-stone-400">
+        {burn.map(p => <span>{p.label}</span>)}
+      </div>
+    </div>
   </div>
 
-  <!-- ── Big Purchase Impact Calculator ── -->
+  <!-- ── Cash-flow Sankey ── -->
+  {sankey.links.length > 0 && (
+    <div class="mb-6 rounded-xl border border-surface-border bg-surface-card p-5">
+      <p class="text-xs uppercase tracking-wide text-stone-500">Cash Flow — {monthName}</p>
+      <p class="mt-1 text-xs text-stone-400">Where each dollar of income lands.</p>
+
+      <svg viewBox={`0 0 ${SW} ${SH}`} class="mt-3 w-full" aria-label="Cash flow sankey">
+        {linkPaths.map(l => (
+          <path
+            d={l.d}
+            fill="none"
+            stroke={sourceColor[l.sourceId] ?? '#94a3b8'}
+            stroke-width={l.thickness}
+            stroke-opacity="0.35"
+            stroke-linecap="round"
+          />
+        ))}
+        {leftBoxes.map(b => (
+          <>
+            <rect x={b.x} y={b.y} width="90" height={b.h} rx="4"
+                  fill={sourceColor[b.id] ?? '#94a3b8'} opacity="0.85" />
+            <text x={b.x + 45} y={b.y + b.h / 2 + 4}
+                  text-anchor="middle" font-size="11" fill="#fff" font-weight="500">
+              {b.label}
+            </text>
+            <text x={b.x + 45} y={b.y - 3}
+                  text-anchor="middle" font-size="9" fill="#78716c">
+              {fmtCurrency(nodeSum(b.id), { compact: true })}
+            </text>
+          </>
+        ))}
+        {rightBoxes.map(b => (
+          <>
+            <rect x={b.x} y={b.y} width="90" height={b.h} rx="4"
+                  fill={targetColor[b.id] ?? '#94a3b8'} opacity="0.85" />
+            <text x={b.x + 45} y={b.y + b.h / 2 + 4}
+                  text-anchor="middle" font-size="11" fill="#fff" font-weight="500">
+              {b.label}
+            </text>
+            <text x={b.x + 45} y={b.y - 3}
+                  text-anchor="middle" font-size="9" fill="#78716c">
+              {fmtCurrency(nodeSum(b.id), { compact: true })}
+            </text>
+          </>
+        ))}
+      </svg>
+    </div>
+  )}
+
+  <!-- ── Purchase Impact Calculator ── -->
   <div class="rounded-xl border border-surface-border bg-surface-card p-5">
-    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-stone-600">Big Purchase Impact</h2>
-    <p class="mb-4 text-xs text-stone-400">See how a large purchase would affect your savings, checking, and year-end position.</p>
+    <h2 class="mb-1 text-xs uppercase tracking-wide text-stone-500">Purchase Impact</h2>
+    <p class="mb-4 text-xs text-stone-400">
+      Simulate a purchase against this month's Safe-to-Spend and your recent free cash flow ({fmtCurrency(recentNet, { compact: true, sign: true })}/mo avg).
+    </p>
     <ImpactCalculator
       client:load
-      currentSavings={projection.currentSavings}
-      avgMonthlyNet={projection.avgMonthlyNet}
-      monthsRemaining={projection.monthsRemaining}
+      monthlyFreeFlow={recentNet}
+      safeToSpendBase={sts.amount}
+      currentSavings={savings}
     />
   </div>
 </Layout>
