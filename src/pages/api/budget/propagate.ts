@@ -42,8 +42,9 @@ export async function POST(context: APIContext): Promise<Response> {
     for (const month of months) {
       const id = `bp_${month}_${bill_id}`;
       await client.execute({
-        sql: `INSERT OR IGNORE INTO bill_payments (id, month, bill_id, amount, is_paid, is_cc)
-              VALUES (?, ?, ?, ?, 0, ?)`,
+        sql: `INSERT INTO bill_payments (id, month, bill_id, amount, is_paid, is_cc, is_skipped)
+              VALUES (?, ?, ?, ?, 0, ?, 0)
+              ON CONFLICT(month, bill_id) DO UPDATE SET is_skipped = 0`,
         args: [id, month, bill_id, amount, isCC],
       });
       // Also ensure monthly_summary exists for this month
