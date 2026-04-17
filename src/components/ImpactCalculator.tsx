@@ -222,49 +222,50 @@ export default function ImpactCalculator({
 function Verdict({ result, reserves }: { result: ScenarioResult; reserves: number }) {
   if (result.totalDelta === 0) return null;
 
-  const isPositive = result.totalDelta > 0;
-
-  if (isPositive) {
+  if (result.totalDelta > 0) {
     return (
       <div className="rounded-lg border border-brand-green/30 bg-brand-green/5 px-4 py-3">
-        <p className="text-sm font-medium text-brand-green">Extra {fmtCurrency(result.totalDelta)} by year-end</p>
+        <p className="text-sm font-medium text-brand-green">
+          +{fmtCurrency(result.totalDelta)} more to save by year-end
+        </p>
         <p className="mt-0.5 text-xs text-stone-500">
-          This adds {fmtCurrency(result.totalDelta, { compact: true })} to your annual surplus.
-          Baseline year-end net: {fmtCurrency(result.eoyBaseNet, { compact: true })} → {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
+          Pre-savings surplus grows from {fmtCurrency(result.eoyBaseNet, { compact: true })} to {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
         </p>
       </div>
     );
   }
+
+  const savingsHit = Math.abs(result.totalDelta);
 
   if (result.verdict === 'needs_reserves') {
     const covered = reserves >= result.reservesDraw;
     return (
       <div className={`rounded-lg border px-4 py-3 ${covered ? 'border-brand-yellow/30 bg-brand-yellow/5' : 'border-brand-red/30 bg-brand-red/5'}`}>
         <p className={`text-sm font-medium ${covered ? 'text-brand-yellow' : 'text-brand-red'}`}>
-          Needs {fmtCurrency(result.reservesDraw)} from reserves
+          You'd pull {fmtCurrency(result.reservesDraw)} from savings to cover this
         </p>
         <p className="mt-0.5 text-xs text-stone-500">
-          Your monthly surplus won't cover this — you'd need to pull {fmtCurrency(result.reservesDraw, { compact: true })} from
-          savings/investments ({fmtCurrency(reserves, { compact: true })} available).
+          In at least one month your pre-savings income doesn't fully cover this expense.
+          You'd need to draw {fmtCurrency(result.reservesDraw, { compact: true })} from savings/investments.{' '}
           {covered
-            ? ' You can handle this.'
-            : ` That exceeds your reserves by ${fmtCurrency(result.reservesDraw - reserves, { compact: true })}.`}
+            ? `You have ${fmtCurrency(reserves, { compact: true })} available — you can cover it, but that money won't be there anymore.`
+            : `Your savings/investments (${fmtCurrency(reserves, { compact: true })}) fall short by ${fmtCurrency(result.reservesDraw - reserves, { compact: true })}.`}
         </p>
       </div>
     );
   }
 
+  // comfortable or tight — pre-savings income covers it, but less goes to savings
   return (
     <div className="rounded-lg border border-brand-yellow/30 bg-brand-yellow/5 px-4 py-3">
       <p className="text-sm font-medium text-brand-yellow">
-        {fmtCurrency(Math.abs(result.totalDelta))} less by year-end — but doable
+        Affordable — {fmtCurrency(savingsHit)} less to save by year-end
       </p>
       <p className="mt-0.5 text-xs text-stone-500">
-        Your baseline pre-savings surplus absorbs this.
-        Year-end net drops from {fmtCurrency(result.eoyBaseNet, { compact: true })} to {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
-        {result.eoyScenarioNet > 0
-          ? ' Still positive — savings just grow slower.'
-          : ' This puts you into deficit territory — watch closely.'}
+        Your pre-savings income covers this each month — nothing comes out of savings.
+        You'd just have {fmtCurrency(savingsHit, { compact: true })} less to put away
+        ({fmtCurrency(result.eoyBaseNet, { compact: true })} → {fmtCurrency(result.eoyScenarioNet, { compact: true })} year-end surplus).
+        {result.eoyScenarioNet < 0 && ' Pre-savings net goes negative — watch closely.'}
       </p>
     </div>
   );

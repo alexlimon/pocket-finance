@@ -151,6 +151,17 @@ function fmt(n: number) {
                         </div>
                       );
                     }
+                    if (a.type === 'savings' || a.type === 'investment') {
+                      return (
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={a.current_balance}
+                          data-account-id={a.id}
+                          class="editable-balance w-32 rounded border border-surface-border bg-surface-hover px-2 py-1 text-sm tabular-nums text-brand-green text-right font-medium focus:border-brand-green focus:outline-none"
+                        />
+                      );
+                    }
                     return (
                       <span class={`tabular-nums font-medium ${a.type === 'credit' ? 'text-brand-red' : 'text-brand-green'}`}>
                         {fmt(a.current_balance)}
@@ -231,6 +242,25 @@ function fmt(n: number) {
   bindCCInput('.cc-billing-end',   'billing_end_day');
   bindCCInput('.cc-payment-day',   'payment_day');
   bindCCInput('.cc-credit-limit',  'credit_limit');
+</script>
+
+<script>
+  document.querySelectorAll<HTMLInputElement>('.editable-balance').forEach(inp => {
+    inp.addEventListener('change', async () => {
+      const balance = parseFloat(inp.value);
+      if (isNaN(balance)) return;
+      const accountId = inp.dataset.accountId;
+      const res = await fetch('/api/accounts/balance', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ accountId, balance }),
+      });
+      if (res.ok) {
+        inp.classList.add('!border-brand-green');
+        setTimeout(() => inp.classList.remove('!border-brand-green'), 1500);
+      }
+    });
+  });
 </script>
 
 <script>
