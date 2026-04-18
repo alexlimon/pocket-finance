@@ -37,6 +37,7 @@ export interface IncomeRow {
   frequency:    string;
   expected_day: number | null;
   entity_id:    string;
+  is_active:    boolean | number;
 }
 
 // ── Balance helpers ──────────────────────────────────────────────────────────

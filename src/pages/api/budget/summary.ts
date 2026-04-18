@@ -21,11 +21,11 @@ export async function POST(context: APIContext): Promise<Response> {
   ]);
 
   const sets: string[] = [];
-  const args: unknown[] = [];
+  const args: (string | number | null)[] = [];
   for (const [k, v] of Object.entries(body)) {
     if (k === 'month' || !allowed.has(k)) continue;
     sets.push(`${k} = ?`);
-    args.push(v);
+    args.push(v as string | number | null);
   }
   if (!sets.length) return json({ error: 'Nothing to update' }, 400);
 
