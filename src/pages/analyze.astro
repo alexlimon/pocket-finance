@@ -1,0 +1,30 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import CSVAnalyzer from '../components/CSVAnalyzer';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+
+const client = getClient(env);
+let initialTransactions = '[]';
+
+try {
+  const result = await client.execute(
+    `SELECT id, account_last4, account_source, date, post_date,
+            description, category, type, amount, memo, uploaded_at
+     FROM csv_transactions
+     ORDER BY date DESC`
+  );
+  initialTransactions = JSON.stringify(result.rows);
+} catch {
+  // Table not yet created — run npm run migrate:csv
+} finally {
+  client.close();
+}
+---
+
+<Layout title="Analyze" wide={true}>
+  <CSVAnalyzer initialTransactions={initialTransactions} client:load />
+</Layout>
