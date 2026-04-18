@@ -88,6 +88,8 @@ The `monthly_summary` table is the central ledger row for each month, storing in
 
 ## Deployment
 
+**Never build or deploy unless explicitly asked.** Always stop at the code change and let the user decide when to ship.
+
 Deploy target is Cloudflare Pages project **"limetiramisu"** (not "pocket-finance").
 
 ```bash

@@ -1,5 +1,5 @@
 import { getClient } from './db';
-import { getAccounts } from './plaid';
+import { getAccounts, getInstitutionName } from './plaid';
 
 const CARD_MAP: { match: (n: string) => boolean; card: string }[] = [
   { match: (n) => n.includes('Ultimate Rewards') || n.includes('Sapphire'), card: 'sapphire' },
@@ -15,9 +15,22 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
   const client = getClient(env);
   const month  = currentMonth();
   try {
-    const items = await client.execute({ sql: 'SELECT id, access_token FROM plaid_items', args: [] });
+    const items = await client.execute({ sql: 'SELECT id, access_token, institution_name FROM plaid_items', args: [] });
     for (const item of items.rows) {
-      const accounts = await getAccounts(String(item.access_token), env);
+      const accessToken = String(item.access_token);
+      const accounts    = await getAccounts(accessToken, env);
+
+      // Backfill institution_name if missing
+      if (!item.institution_name) {
+        const name = await getInstitutionName(accessToken, env).catch(() => null);
+        if (name) {
+          await client.execute({
+            sql:  'UPDATE plaid_items SET institution_name = ? WHERE id = ?',
+            args: [name, String(item.id)],
+          });
+        }
+      }
+
       for (const acct of accounts) {
         if (acct.type !== 'credit') continue;
         const mapping = CARD_MAP.find(m => m.match(acct.official_name ?? ''));
@@ -29,6 +42,11 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
           args: [month, mapping.card, used],
         });
       }
+
+      await client.execute({
+        sql:  `UPDATE plaid_items SET last_synced = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?`,
+        args: [String(item.id)],
+      });
     }
   } finally {
     client.close();

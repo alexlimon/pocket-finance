@@ -14,7 +14,7 @@ const client = getClient(env);
 let items: { id: string; institution_name: string | null; last_synced: string | null }[] = [];
 let accounts: { id: string; name: string; type: string; current_balance: number; entity_id: string; plaid_item_id: string }[] = [];
 let ccSettings: { card: string; display_name: string; billing_end_day: number; payment_day: number; credit_limit: number | null }[] = [];
-let variableSpendRows: { card: string; amount: number }[] = [];
+let variableSpendRows: { card: string; amount: number; updated_at: string | null }[] = [];
 
 const thisMonth = currentMonth();
 const todayDay  = new Date().getDate();
@@ -24,7 +24,7 @@ try {
     client.execute('SELECT id, institution_name, last_synced FROM plaid_items ORDER BY created_at DESC'),
     client.execute('SELECT id, name, type, current_balance, entity_id, plaid_item_id FROM accounts WHERE is_active = 1 ORDER BY name'),
     client.execute("SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card"),
-    client.execute({ sql: 'SELECT card, amount FROM cc_variable_spend WHERE month = ?', args: [thisMonth] }),
+    client.execute({ sql: 'SELECT card, amount, updated_at FROM cc_variable_spend WHERE month = ?', args: [thisMonth] }),
   ]);
   items             = itemRes.rows as unknown as typeof items;
   accounts          = acctRes.rows as unknown as typeof accounts;
@@ -88,22 +88,48 @@ function fmt(n: number) {
   {items.length > 0 && (
     <div class="mb-6">
       <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Connected Banks</h2>
-      <div class="space-y-2">
+      <div class="space-y-3">
         {items.map(item => (
-          <div class="flex items-center justify-between rounded-xl border border-surface-border bg-surface-card px-4 py-3">
-            <div>
-              <p class="text-sm font-medium text-stone-700">{item.institution_name ?? 'Unknown Bank'}</p>
-              <p class="text-xs text-stone-400">
-                Last synced: {item.last_synced ? new Date(item.last_synced).toLocaleString() : 'Never'}
-              </p>
+          <div class="rounded-xl border border-surface-border bg-surface-card px-4 py-3">
+            <div class="flex items-center justify-between mb-3">
+              <div>
+                <p class="text-sm font-medium text-stone-700">{item.institution_name ?? 'Unknown Bank'}</p>
+                <p class="text-xs text-stone-400">
+                  Last synced: {item.last_synced
+                    ? new Date(item.last_synced).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})
+                    : 'Never'}
+                </p>
+              </div>
+              <form action="/api/plaid/sync" method="POST">
+                <input type="hidden" name="item_id" value={item.id} />
+                <button
+                  type="submit"
+                  class="rounded-lg border border-surface-border px-3 py-1.5 text-xs text-stone-500 hover:border-brand-green hover:text-brand-green"
+                >Sync now</button>
+              </form>
             </div>
-            <form action="/api/plaid/sync" method="POST">
-              <input type="hidden" name="item_id" value={item.id} />
-              <button
-                type="submit"
-                class="rounded-lg border border-surface-border px-3 py-1.5 text-xs text-stone-500 hover:border-brand-green hover:text-brand-green"
-              >Sync now</button>
-            </form>
+            {/* Tracked CC accounts */}
+            {variableSpendRows.filter(r => r.updated_at).length > 0 && (
+              <div class="border-t border-surface-border pt-3 space-y-2">
+                {variableSpendRows.filter(r => r.updated_at).map(row => {
+                  const setting = ccSettingsMap.get(row.card);
+                  if (!setting) return null;
+                  return (
+                    <div class="flex items-center justify-between text-sm">
+                      <span class="text-stone-600">{setting.display_name}</span>
+                      <div class="text-right">
+                        <span class="tabular-nums font-medium text-brand-red">{fmt(row.amount)}</span>
+                        {row.updated_at && (
+                          <p class="text-[10px] text-stone-400">
+                            synced {new Date(row.updated_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
       </div>

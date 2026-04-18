@@ -68,6 +68,24 @@ export async function exchangePublicToken(
   }, env);
 }
 
+// ── Institution ─────────────────────────────────────────────────────────────
+
+export async function getInstitutionName(
+  accessToken: string,
+  env: PlaidEnv,
+): Promise<string> {
+  const itemData = await plaidPost<{ item: { institution_id: string | null } }>('/item/get', {
+    access_token: accessToken,
+  }, env);
+  const institutionId = itemData.item.institution_id;
+  if (!institutionId) return 'Unknown Bank';
+  const data = await plaidPost<{ institution: { name: string } }>('/institutions/get_by_id', {
+    institution_id: institutionId,
+    country_codes:  ['US'],
+  }, env);
+  return data.institution.name;
+}
+
 // ── Accounts ────────────────────────────────────────────────────────────────
 
 export interface PlaidAccount {
