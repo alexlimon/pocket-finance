@@ -1,7 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
-import { exchangePublicToken } from '../../../lib/plaid';
+import { exchangePublicToken, getInstitutionName } from '../../../lib/plaid';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -19,12 +19,13 @@ export async function POST(context: APIContext): Promise<Response> {
 
   try {
     const { access_token, item_id } = await exchangePublicToken(publicToken, env);
+    const institutionName = await getInstitutionName(access_token, env).catch(() => 'Unknown Bank');
 
     const client = getClient(env);
     try {
       await client.execute({
-        sql:  `INSERT OR REPLACE INTO plaid_items (id, access_token) VALUES (?, ?)`,
-        args: [item_id, access_token],
+        sql:  `INSERT OR REPLACE INTO plaid_items (id, access_token, institution_name) VALUES (?, ?, ?)`,
+        args: [item_id, access_token, institutionName],
       });
     } finally {
       client.close();
