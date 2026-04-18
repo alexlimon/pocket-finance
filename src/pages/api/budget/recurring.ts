@@ -62,16 +62,16 @@ export async function PATCH(context: APIContext): Promise<Response> {
   if (!id) return json({ error: 'id required' }, 400);
 
   const allowed = new Set(['name','monthly_target','due_day','is_cc_default','entity_id','category_id','start_month','end_month']);
-  const sets: string[] = []; const args: unknown[] = [];
+  const sets: string[] = []; const args: (string | number | null)[] = [];
   for (const [k, v] of Object.entries(fields)) {
     if (!allowed.has(k)) continue;
-    sets.push(`${k} = ?`); args.push(v);
+    sets.push(`${k} = ?`); args.push(v as string | number | null);
   }
   if (!sets.length) return json({ error: 'Nothing to update' }, 400);
 
   const client = getClient(env);
   try {
-    await client.execute({ sql: `UPDATE budget_config SET ${sets.join(', ')} WHERE id = ?`, args: [...args, id] });
+    await client.execute({ sql: `UPDATE budget_config SET ${sets.join(', ')} WHERE id = ?`, args: [...args, id as string] });
     return json({ ok: true });
   } finally { client.close(); }
 }

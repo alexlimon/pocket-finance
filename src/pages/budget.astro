@@ -3,6 +3,7 @@ import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
+import { syncCCSpend } from '../lib/plaid-sync';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
@@ -11,6 +12,8 @@ import {
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+
+Astro.locals.runtime.ctx.waitUntil(syncCCSpend(env));
 
 const month    = Astro.url.searchParams.get('month') ?? currentMonth();
 const prev     = prevMonth(month);
@@ -32,7 +35,7 @@ let nextBills:        ResolvedBill[] = [];
 let bigPurchases:     BigPurchase[]  = [];
 let cashExpenses:     CashExpense[]  = [];
 let ccSettings:       { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
-let variableSpendRows:{ card: string; amount: number }[] = [];
+let variableSpendRows:{ card: string; amount: number; updated_at: string | null }[] = [];
 let nextMonthCCBudget: number | null = null;
 
 // ── Database fetches ─────────────────────────────────────────────────────────
@@ -150,6 +153,7 @@ const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRe
 const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
         variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
+const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 ---
 
@@ -405,10 +409,17 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
       return (
         <div class="flex items-center gap-4 rounded-lg border border-surface-border px-4 py-3 hover:bg-surface-hover">
           <span class="text-sm font-medium text-stone-600 w-36 flex-shrink-0">{s.display_name}</span>
-          <span
-            class="var-spend-amount tabular-nums text-xl font-semibold cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
-            data-card={s.card} data-month={month}
-          >{fmt(amount)}</span>
+          <div class="flex flex-col items-start">
+            <span
+              class="var-spend-amount tabular-nums text-xl font-semibold cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
+              data-card={s.card} data-month={month}
+            >{fmt(amount)}</span>
+            {variableUpdatedAt.get(s.card) && (
+              <span class="text-xs text-stone-400 px-2" title="Last synced from Plaid">
+                synced {new Date(variableUpdatedAt.get(s.card)!).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
+              </span>
+            )}
+          </div>
           <span class="text-xs text-stone-400 flex-1">paying {payLabel}</span>
           <span class="text-xs text-stone-400">closes {s.billing_end_day}th</span>
         </div>

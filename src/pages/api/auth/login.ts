@@ -1,7 +1,6 @@
 import type { APIContext } from 'astro';
-import { json } from '../../../lib/db';
-import { hashPassword, hasPassword, createSession, getClient } from '../../../lib/auth';
-import { getClient as getDbClient } from '../../../lib/db';
+import { hashPassword, hasPassword, createSession } from '../../../lib/auth';
+import { getClient } from '../../../lib/db';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -16,14 +15,10 @@ export async function POST(context: APIContext): Promise<Response> {
 
   if (!password) return context.redirect('/login?error=1');
 
-  // Check if password is configured
-  if (!(await hasPassword(env))) {
-    return context.redirect('/setup');
-  }
+  if (!(await hasPassword(env))) return context.redirect('/setup');
 
-  // Verify password
   const hash   = await hashPassword(password);
-  const client = getDbClient(env);
+  const client = getClient(env);
   let match    = false;
   try {
     const result = await client.execute({

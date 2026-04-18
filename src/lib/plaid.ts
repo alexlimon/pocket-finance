@@ -79,6 +79,7 @@ export interface PlaidAccount {
   balances: {
     current:   number | null;
     available: number | null;
+    limit:     number | null;
   };
 }
 
@@ -90,85 +91,4 @@ export async function getAccounts(
     access_token: accessToken,
   }, env);
   return data.accounts;
-}
-
-// ── Transactions Sync ────────────────────────────────────────────────────────
-
-export interface PlaidTransaction {
-  transaction_id: string;
-  account_id:     string;
-  date:           string;           // YYYY-MM-DD
-  authorized_date: string | null;
-  name:           string;
-  merchant_name:  string | null;
-  amount:         number;           // positive = debit, negative = credit
-  pending:        boolean;
-  personal_finance_category: { primary: string; detailed: string } | null;
-}
-
-export interface SyncResult {
-  added:       PlaidTransaction[];
-  modified:    PlaidTransaction[];
-  removed:     { transaction_id: string }[];
-  next_cursor: string;
-  has_more:    boolean;
-}
-
-/** Fetches all new/modified/removed transactions since the last cursor.
- *  Automatically paginates when has_more is true. */
-export async function syncTransactions(
-  accessToken: string,
-  cursor:       string | null,
-  env:          PlaidEnv,
-): Promise<{ added: PlaidTransaction[]; modified: PlaidTransaction[]; removed: string[]; nextCursor: string }> {
-  const added: PlaidTransaction[]    = [];
-  const modified: PlaidTransaction[] = [];
-  const removed: string[]            = [];
-  let currentCursor                  = cursor ?? '';
-  let hasMore                        = true;
-
-  while (hasMore) {
-    const page = await plaidPost<SyncResult>('/transactions/sync', {
-      access_token: accessToken,
-      cursor:       currentCursor || undefined,
-      count:        500,
-    }, env);
-
-    added.push(...page.added);
-    modified.push(...page.modified);
-    removed.push(...page.removed.map(r => r.transaction_id));
-    currentCursor = page.next_cursor;
-    hasMore       = page.has_more;
-  }
-
-  return { added, modified, removed, nextCursor: currentCursor };
-}
-
-// ── Institution ──────────────────────────────────────────────────────────────
-
-export interface InstitutionResponse {
-  institution: { institution_id: string; name: string };
-}
-
-export async function getItem(
-  accessToken: string,
-  env: PlaidEnv,
-): Promise<{ item_id: string; institution_id: string | null }> {
-  const data = await plaidPost<{ item: { item_id: string; institution_id: string | null } }>(
-    '/item/get',
-    { access_token: accessToken },
-    env,
-  );
-  return data.item;
-}
-
-export async function getInstitutionName(
-  institutionId: string,
-  env: PlaidEnv,
-): Promise<string> {
-  const data = await plaidPost<InstitutionResponse>('/institutions/get_by_id', {
-    institution_id: institutionId,
-    country_codes:  ['US'],
-  }, env);
-  return data.institution.name;
 }

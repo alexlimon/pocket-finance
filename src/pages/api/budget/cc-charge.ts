@@ -56,11 +56,11 @@ export async function PATCH(context: APIContext): Promise<Response> {
 
   const allowed = new Set(['description','amount','card','is_big_purchase','date']);
   const sets: string[] = [];
-  const args: unknown[] = [];
+  const args: (string | number | null)[] = [];
   for (const [k, v] of Object.entries(fields)) {
     if (!allowed.has(k)) continue;
     sets.push(`${k} = ?`);
-    args.push(k === 'is_big_purchase' ? (v ? 1 : 0) : v);
+    args.push(k === 'is_big_purchase' ? (v ? 1 : 0) : v as string | number | null);
   }
   if (!sets.length) return json({ error: 'Nothing to update' }, 400);
 

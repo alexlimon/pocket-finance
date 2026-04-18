@@ -12,7 +12,7 @@ export async function GET(context: APIContext): Promise<Response> {
   const limit    = Math.min(Number(sp.get('limit') ?? 200), 500);
   const offset   = Number(sp.get('offset') ?? 0);
 
-  const args: unknown[] = [`${month}%`];
+  const args: (string | number | null)[] = [`${month}%`];
   let entityClause = '';
   if (entity !== 'all') { entityClause = 'AND t.entity_id = ?'; args.push(entity); }
 

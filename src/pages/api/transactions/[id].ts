@@ -20,13 +20,13 @@ export async function PATCH(context: APIContext): Promise<Response> {
   }
 
   const updates: string[] = [];
-  const args:    unknown[] = [];
+  const args:    (string | number | null)[] = [];
 
   for (const [key, val] of Object.entries(body)) {
     if (!PATCHABLE_FIELDS.has(key)) continue;
     if (key === 'entity_id' && !VALID_ENTITIES.has(String(val))) continue;
     updates.push(`${key} = ?`);
-    args.push(val);
+    args.push(val as string | number | null);
   }
 
   if (updates.length === 0) return json({ error: 'No valid fields to update' }, 400);
