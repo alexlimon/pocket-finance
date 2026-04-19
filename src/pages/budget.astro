@@ -415,8 +415,8 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
               data-card={s.card} data-month={month}
             >{fmt(amount)}</span>
             {variableUpdatedAt.get(s.card) && (
-              <span class="text-xs text-stone-400 px-2" title="Last synced from Plaid">
-                synced {new Date(variableUpdatedAt.get(s.card)!).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}
+              <span class="synced-time text-xs text-stone-400 px-2" title="Last synced from Plaid" data-ts={variableUpdatedAt.get(s.card)}>
+                synced …
               </span>
             )}
           </div>
@@ -598,6 +598,14 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
 <script>
 const MONTH = new URLSearchParams(location.search).get('month') ??
   (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
+
+// Format synced timestamps in browser-local time
+document.querySelectorAll<HTMLElement>('.synced-time[data-ts]').forEach(el => {
+  const ts = el.dataset.ts;
+  if (!ts) return;
+  const d = new Date(ts);
+  el.textContent = `synced ${d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+});
 
 function usd(n: number) {
   return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2}).format(n);
@@ -1203,5 +1211,24 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
       api('/api/budget/summary', 'POST', { month: MONTH, checking_after: checkEnd }).catch(() => {});
     }
   }
+})();
+
+// Swipe left/right to navigate months
+(function() {
+  const [y, m] = MONTH.split('-').map(Number);
+  const PREV = m === 1 ? `${y-1}-12` : `${y}-${String(m-1).padStart(2,'0')}`;
+  const NEXT = m === 12 ? `${y+1}-01` : `${y}-${String(m+1).padStart(2,'0')}`;
+  let startX = 0;
+  let startY = 0;
+  document.addEventListener('touchstart', (e: TouchEvent) => {
+    startX = e.touches[0]!.clientX;
+    startY = e.touches[0]!.clientY;
+  }, { passive: true });
+  document.addEventListener('touchend', (e: TouchEvent) => {
+    const dx = e.changedTouches[0]!.clientX - startX;
+    const dy = e.changedTouches[0]!.clientY - startY;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    window.location.href = dx < 0 ? `/budget?month=${NEXT}` : `/budget?month=${PREV}`;
+  }, { passive: true });
 })();
 </script>

@@ -63,7 +63,7 @@ const {
       <>
         {/* Desktop nav */}
         <header class="sticky top-0 z-50 border-b border-surface-border bg-surface/95 backdrop-blur hidden sm:block">
-          <nav class={`mx-auto flex items-center justify-between px-4 py-3 ${wide ? 'max-w-7xl' : 'max-w-2xl'}`}>
+          <nav class={`mx-auto flex items-center justify-between px-4 py-3 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
             <a href="/" class="flex items-center gap-2 text-sm font-bold tracking-tight text-stone-800 hover:opacity-80">
               <!-- Tiramisu slice icon: cocoa top / cream / espresso ladyfinger / lime zest dot -->
               <svg width="22" height="20" viewBox="0 0 22 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -142,7 +142,7 @@ const {
       </>
     )}
 
-    <main class={`mx-auto px-4 py-5 pb-24 sm:pb-6 ${wide ? 'max-w-7xl' : 'max-w-2xl'}`}>
+    <main class={`mx-auto px-4 py-5 pb-24 sm:pb-6 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
       <slot />
     </main>
   </body>
