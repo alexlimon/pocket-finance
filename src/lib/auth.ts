@@ -69,7 +69,7 @@ export async function createSession(env: Env): Promise<string> {
   } finally {
     client.close();
   }
-  return `session=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=2592000`; // 30 days
+  return `session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=2592000`; // 30 days — Lax required for OAuth redirect callbacks
 }
 
 /** Destroy the current session in DB. */

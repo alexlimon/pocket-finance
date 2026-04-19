@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -16,10 +16,26 @@ interface CsvTransaction {
   uploaded_at: string;
 }
 
+interface GmailStatus {
+  connected:    boolean;
+  lastSync:     string | null;
+  ordersCount:  number;
+  matchedCount: number;
+}
+
+interface AmazonMatch {
+  txn_id:         string;
+  order_id:       string;
+  order_total:    number;
+  shipment_count: number;
+  all_items_raw:  string | null; // shipment items_json arrays joined by '||'
+}
+
 type Tab = 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top';
 
 interface Props {
   initialTransactions: string;
+  initialGmailStatus:  string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -50,37 +66,76 @@ function isPurchase(t: CsvTransaction): boolean {
 interface Subscription {
   vendor: string;
   amount: number;
+  total: number;
   months: string[];
   count: number;
   account_last4: string;
 }
 
-function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
-  const purchases = txns.filter(isPurchase);
-  const groups = new Map<string, CsvTransaction[]>();
+function normalizeVendor(desc: string): string {
+  return desc
+    .toUpperCase()
+    .trim()
+    // "AMAZON PRIME*A1B2C3" → "AMAZON PRIME"
+    .replace(/\*[A-Z0-9]+$/, '')
+    // trailing transaction/store IDs: "STARBUCKS #12345" → "STARBUCKS", "NETFLIX 8X9YZ" → "NETFLIX"
+    .replace(/\s+#?\d{4,}$/, '')
+    // trailing 2-letter state/country code
+    .replace(/\s+[A-Z]{2}$/, '')
+    .trim();
+}
 
+function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
+  const purchases = txns.filter(t => isPurchase(t) && !normalizeVendor(t.description).startsWith('AMAZON'));
+
+  // First pass: group by (normalizedVendor, account_last4) — same vendor across months
+  const byVendorAcct = new Map<string, CsvTransaction[]>();
   for (const t of purchases) {
-    // Round to 2 decimal places to avoid floating-point key mismatches
-    const amt = Math.round(Math.abs(t.amount) * 100) / 100;
-    const key = `${t.description.trim().toUpperCase()}||${amt}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(t);
+    const key = `${normalizeVendor(t.description)}||${t.account_last4}`;
+    if (!byVendorAcct.has(key)) byVendorAcct.set(key, []);
+    byVendorAcct.get(key)!.push(t);
   }
 
   const results: Subscription[] = [];
-  for (const [, rows] of groups) {
-    const months = [...new Set(rows.map(r => r.date.slice(0, 7)))].sort();
-    if (months.length < 2) continue;
+  for (const [, rows] of byVendorAcct) {
+    // Per month: sum all charges under this vendor (handles same-month duplicates / split charges)
+    const byMonth = new Map<string, number>();
+    for (const t of rows) {
+      const ym = t.date.slice(0, 7);
+      byMonth.set(ym, (byMonth.get(ym) ?? 0) + Math.abs(t.amount));
+    }
+    const months = [...byMonth.keys()].sort();
+    // Require at least 2 back-to-back consecutive months with amounts within 10% of each other
+    const hasConsecutive = months.some((ym, i) => {
+      if (i === 0) return false;
+      const [y1, m1] = months[i - 1]!.split('-').map(Number);
+      const [y2, m2] = ym.split('-').map(Number);
+      if (y2 * 12 + m2 !== y1 * 12 + m1 + 1) return false;
+      const a1 = byMonth.get(months[i - 1]!)!;
+      const a2 = byMonth.get(ym)!;
+      const avg = (a1 + a2) / 2;
+      return Math.abs(a1 - a2) / avg <= 0.10;
+    });
+    if (!hasConsecutive) continue;
+
+    // Use the median monthly amount as the representative charge
+    const monthlyAmounts = months.map(m => byMonth.get(m)!).sort((a, b) => a - b);
+    const medianAmt = monthlyAmounts[Math.floor(monthlyAmounts.length / 2)]!;
+
+    // Pick the most descriptive original description (longest after trimming)
+    const vendor = rows.reduce((best, t) => t.description.length > best.length ? t.description : best, '');
+
     results.push({
-      vendor: rows[0]!.description,
-      amount: Math.abs(rows[0]!.amount),
+      vendor,
+      amount: Math.round(medianAmt * 100) / 100,
+      total: Math.round(monthlyAmounts.reduce((s, a) => s + a, 0) * 100) / 100,
       months,
       count: rows.length,
       account_last4: rows[0]!.account_last4,
     });
   }
 
-  return results.sort((a, b) => b.amount - a.amount);
+  return results.sort((a, b) => b.months.length - a.months.length || b.amount - a.amount);
 }
 
 interface CategoryRow {
@@ -107,7 +162,7 @@ function categorizeSpend(txns: CsvTransaction[]): CategoryRow[] {
 }
 
 interface AmazonData {
-  topPurchases: CsvTransaction[];
+  allPurchases: CsvTransaction[];
   byMonth: [string, number][];
   total: number;
 }
@@ -120,7 +175,7 @@ function getAmazonData(txns: CsvTransaction[]): AmazonData {
     byMonth.set(m, (byMonth.get(m) ?? 0) + Math.abs(t.amount));
   }
   return {
-    topPurchases: [...amazon].sort((a, b) => a.amount - b.amount).slice(0, 25),
+    allPurchases: [...amazon].sort((a, b) => b.date.localeCompare(a.date)),
     byMonth: [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])),
     total: amazon.reduce((s, t) => s + Math.abs(t.amount), 0),
   };
@@ -258,6 +313,7 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
               <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
               <th className="px-4 py-2.5 text-right font-medium">Amount</th>
               <th className="px-4 py-2.5 text-center font-medium">Months seen</th>
+              <th className="px-4 py-2.5 text-right font-medium">Actual total</th>
               <th className="px-4 py-2.5 text-right font-medium">Annual est.</th>
               <th className="px-4 py-2.5 text-left font-medium">Acct</th>
             </tr>
@@ -278,6 +334,7 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
                     ))}
                   </div>
                 </td>
+                <td className="px-4 py-2.5 text-right tabular-nums text-stone-600">{fmt(s.total)}</td>
                 <td className="px-4 py-2.5 text-right tabular-nums text-stone-500">{fmt(s.amount * 12)}</td>
                 <td className="px-4 py-2.5">
                   <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">
@@ -353,9 +410,120 @@ function CategoriesPanel({ txns }: { txns: CsvTransaction[] }) {
 
 // ── Panel: Amazon ─────────────────────────────────────────────────────────────
 
-function AmazonPanel({ txns }: { txns: CsvTransaction[] }) {
-  const data = useMemo(() => getAmazonData(txns), [txns]);
+function GmailBanner({
+  status,
+  onSync,
+  syncing,
+  syncMsg,
+}: {
+  status:   GmailStatus;
+  onSync:   () => void;
+  syncing:  boolean;
+  syncMsg:  string;
+}) {
+  if (!status.connected) {
+    return (
+      <div className="flex items-center justify-between rounded-xl border border-stone-200 bg-stone-50 px-4 py-3">
+        <div>
+          <p className="text-sm font-medium text-stone-700">Connect Gmail to match orders to purchases</p>
+          <p className="text-xs text-stone-400">Read-only access · only fetches Amazon order emails</p>
+        </div>
+        <a
+          href="/api/gmail/auth"
+          className="shrink-0 rounded-lg bg-stone-800 px-3 py-1.5 text-sm font-medium text-white hover:bg-stone-700"
+        >
+          Connect Gmail
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center justify-between rounded-xl border border-lime-200 bg-lime-50 px-4 py-3">
+      <div>
+        <p className="text-sm font-medium text-lime-800">
+          Gmail connected · {status.ordersCount} orders · {status.matchedCount} matched
+        </p>
+        <p className="text-xs text-lime-600">
+          {status.lastSync
+            ? `Last synced ${new Date(status.lastSync).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+            : 'Never synced'}
+          {syncMsg && <span className="ml-2">{syncMsg}</span>}
+        </p>
+      </div>
+      <button
+        onClick={onSync}
+        disabled={syncing}
+        className="shrink-0 rounded-lg bg-lime-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-lime-800 disabled:opacity-50"
+      >
+        {syncing ? 'Syncing…' : 'Sync Now'}
+      </button>
+    </div>
+  );
+}
+
+function AmazonPanel({
+  txns,
+  gmailStatus,
+  matches,
+  onGmailSync,
+}: {
+  txns:        CsvTransaction[];
+  gmailStatus: GmailStatus;
+  matches:     AmazonMatch[];
+  onGmailSync: (updated: GmailStatus) => void;
+}) {
+  const data    = useMemo(() => getAmazonData(txns), [txns]);
   const has3606 = txns.some(t => t.account_last4 === '3606');
+  const [syncing,      setSyncing]      = useState(false);
+  const [syncMsg,      setSyncMsg]      = useState('');
+  const [ohUploading,  setOhUploading]  = useState(false);
+  const [ohMsg,        setOhMsg]        = useState('');
+  const ohInputRef = useRef<HTMLInputElement>(null);
+
+  const matchMap = useMemo(() => {
+    const m = new Map<string, AmazonMatch>();
+    for (const match of matches) m.set(match.txn_id, match);
+    return m;
+  }, [matches]);
+
+  const handleSync = useCallback(async () => {
+    setSyncing(true);
+    setSyncMsg('');
+    try {
+      const res  = await fetch('/api/gmail/sync', { method: 'POST' });
+      const data = await res.json() as { ok?: boolean; fetched?: number; parsed?: number; inserted?: number; totalMatches?: number; error?: string };
+      if (!res.ok || data.error) { setSyncMsg(`Error: ${data.error}`); return; }
+      setSyncMsg(`${data.inserted} new orders · ${data.totalMatches} matched`);
+      const statusRes = await fetch('/api/gmail/status');
+      const newStatus = await statusRes.json() as GmailStatus;
+      onGmailSync(newStatus);
+    } catch {
+      setSyncMsg('Network error');
+    } finally {
+      setSyncing(false);
+    }
+  }, [onGmailSync]);
+
+  const handleOrderHistoryUpload = useCallback(async (file: File) => {
+    setOhUploading(true);
+    setOhMsg('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res  = await fetch('/api/csv/amazon-orders', { method: 'POST', body: fd });
+      const data = await res.json() as { ok?: boolean; orders?: number; matched?: number; total3606?: number; error?: string };
+      if (!res.ok || data.error) { setOhMsg(`Error: ${data.error}`); return; }
+      setOhMsg(`${data.orders} orders loaded · ${data.matched} of ${data.total3606} CC transactions matched`);
+      // Reload matches
+      onGmailSync({ ...gmailStatus, ordersCount: data.orders ?? 0, matchedCount: data.matched ?? 0 });
+      // bubble matches up via a status update — parent reloads them via reloadMatches
+    } catch {
+      setOhMsg('Network error');
+    } finally {
+      setOhUploading(false);
+    }
+  }, [gmailStatus, onGmailSync]);
 
   if (!has3606) {
     return <EmptyState message="Upload Chase3606_Activity…CSV to see Amazon CC analysis." />;
@@ -363,9 +531,26 @@ function AmazonPanel({ txns }: { txns: CsvTransaction[] }) {
 
   return (
     <div className="space-y-5">
-      <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-        <span className="font-semibold">Coming soon:</span> Connect Gmail to pull order numbers and match purchases to items.
+      {/* Order History CSV upload */}
+      <div
+        onClick={() => ohInputRef.current?.click()}
+        className="flex cursor-pointer items-center justify-between rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 hover:bg-white transition-colors"
+      >
+        <div>
+          <p className="text-sm font-medium text-stone-700">Amazon Order History CSV</p>
+          <p className="text-xs text-stone-400">
+            {ohMsg || 'Account → Reports → Order History Reports → download CSV · maps all orders to CC charges'}
+          </p>
+        </div>
+        <input ref={ohInputRef} type="file" accept=".csv,.CSV" className="sr-only"
+          onChange={e => { const f = e.target.files?.[0]; if (f) handleOrderHistoryUpload(f); e.target.value = ''; }} />
+        <span className={`shrink-0 rounded-lg px-3 py-1.5 text-sm font-medium text-white transition-colors
+          ${ohUploading ? 'bg-stone-400' : ohMsg && !ohMsg.startsWith('Error') ? 'bg-lime-600 hover:bg-lime-700' : 'bg-stone-700 hover:bg-stone-600'}`}>
+          {ohUploading ? 'Loading…' : ohMsg && !ohMsg.startsWith('Error') ? 'Re-upload' : 'Upload'}
+        </span>
       </div>
+
+      <GmailBanner status={gmailStatus} onSync={handleSync} syncing={syncing} syncMsg={syncMsg} />
 
       <div>
         <h3 className="mb-2 text-sm font-semibold text-stone-700">Monthly Spend</h3>
@@ -396,26 +581,57 @@ function AmazonPanel({ txns }: { txns: CsvTransaction[] }) {
       </div>
 
       <div>
-        <h3 className="mb-2 text-sm font-semibold text-stone-700">Top Purchases</h3>
+        <h3 className="mb-2 text-sm font-semibold text-stone-700">
+          All Transactions
+          <span className="ml-2 font-normal text-stone-400">({data.allPurchases.length})</span>
+        </h3>
         <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+          <div className="max-h-[600px] overflow-y-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
                 <th className="px-4 py-2.5 text-left font-medium">Date</th>
-                <th className="px-4 py-2.5 text-left font-medium">Description</th>
+                <th className="px-4 py-2.5 text-left font-medium">Description / Items</th>
                 <th className="px-4 py-2.5 text-right font-medium">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
-              {data.topPurchases.map(t => (
-                <tr key={t.id} className="hover:bg-stone-50">
-                  <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
-                  <td className="max-w-[280px] truncate px-4 py-2.5 text-stone-700" title={t.description}>{t.description}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
-                </tr>
-              ))}
+              {data.allPurchases.map((t: CsvTransaction) => {
+                const match = matchMap.get(t.id);
+                const items: { name: string; qty: number }[] = match?.all_items_raw
+                  ? match.all_items_raw.split('||').flatMap(chunk => {
+                      try { return JSON.parse(chunk) as { name: string; qty: number }[]; } catch { return []; }
+                    })
+                  : [];
+                return (
+                  <tr key={t.id} className="hover:bg-stone-50">
+                    <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
+                    <td className="px-4 py-2.5">
+                      <div className="max-w-[320px]">
+                        <span className="truncate text-stone-500 text-xs font-mono" title={t.description}>{t.description}</span>
+                        {match && (
+                          <div className="mt-0.5">
+                            <span className="mr-1 rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">
+                              #{match.order_id}
+                            </span>
+                            {items.slice(0, 2).map((item, i) => (
+                              <span key={i} className="mr-1 truncate text-xs text-stone-700">{item.qty > 1 ? `${item.qty}× ` : ''}{item.name}</span>
+                            ))}
+                            {items.length > 2 && <span className="text-xs text-stone-400">+{items.length - 2} more</span>}
+                          </div>
+                        )}
+                        {!match && gmailStatus.connected && (
+                          <div className="mt-0.5 text-[10px] text-stone-300">no email match</div>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </div>
@@ -577,16 +793,52 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'top',           label: 'Top Purchases' },
 ];
 
-export default function CSVAnalyzer({ initialTransactions }: Props) {
+export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }: Props) {
   const [transactions, setTransactions] = useState<CsvTransaction[]>(() => {
     try { return JSON.parse(initialTransactions) as CsvTransaction[]; }
     catch { return []; }
   });
+  const [gmailStatus, setGmailStatus] = useState<GmailStatus>(() => {
+    try { return JSON.parse(initialGmailStatus) as GmailStatus; }
+    catch { return { connected: false, lastSync: null, ordersCount: 0, matchedCount: 0 }; }
+  });
+  const [matches, setMatches] = useState<AmazonMatch[]>([]);
   const [activeTab, setActiveTab] = useState<Tab>('subscriptions');
   const [uploading, setUploading] = useState(false);
   const [uploadMsg, setUploadMsg] = useState('');
 
   const accountInfo = useMemo(() => buildAccountInfo(transactions), [transactions]);
+
+  // Replace Amazon transaction descriptions with the primary product name when matched.
+  // This lets subscription detection work on real product names instead of opaque reference codes.
+  const enrichedTxns = useMemo<CsvTransaction[]>(() => {
+    if (!matches.length) return transactions;
+    const matchMap = new Map(matches.map(m => [m.txn_id, m]));
+    return transactions.map(t => {
+      const match = matchMap.get(t.id);
+      if (!match?.all_items_raw) return t;
+      const items: { name: string; qty: number }[] = match.all_items_raw.split('||').flatMap(chunk => {
+        try { return JSON.parse(chunk) as { name: string; qty: number }[]; } catch { return []; }
+      });
+      const primaryName = items[0]?.name;
+      if (!primaryName) return t;
+      return { ...t, description: primaryName };
+    });
+  }, [transactions, matches]);
+
+  const reloadMatches = useCallback(async () => {
+    try {
+      const res  = await fetch('/api/gmail/matches');
+      if (!res.ok) return;
+      const rows = await res.json() as AmazonMatch[];
+      setMatches(rows);
+    } catch { /* non-critical */ }
+  }, []);
+
+  // Load matches on mount if Gmail is connected
+  useEffect(() => {
+    if (gmailStatus.connected) reloadMatches();
+  }, [gmailStatus.connected, reloadMatches]);
 
   const reloadTransactions = useCallback(async () => {
     const res = await fetch('/api/csv/transactions');
@@ -672,11 +924,11 @@ export default function CSVAnalyzer({ initialTransactions }: Props) {
               </TabBtn>
             ))}
           </div>
-          {activeTab === 'subscriptions' && <SubscriptionsPanel txns={transactions} />}
-          {activeTab === 'categories'    && <CategoriesPanel    txns={transactions} />}
-          {activeTab === 'amazon'        && <AmazonPanel        txns={transactions} />}
-          {activeTab === 'statements'    && <StatementsPanel    txns={transactions} />}
-          {activeTab === 'top'           && <TopPurchasesPanel  txns={transactions} />}
+          {activeTab === 'subscriptions' && <SubscriptionsPanel txns={enrichedTxns} />}
+          {activeTab === 'categories'    && <CategoriesPanel    txns={enrichedTxns} />}
+          {activeTab === 'amazon'        && <AmazonPanel        txns={transactions} gmailStatus={gmailStatus} matches={matches} onGmailSync={s => { setGmailStatus(s); reloadMatches(); }} />}
+          {activeTab === 'statements'    && <StatementsPanel    txns={enrichedTxns} />}
+          {activeTab === 'top'           && <TopPurchasesPanel  txns={enrichedTxns} />}
         </div>
       ) : (
         <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-6 py-12 text-center">

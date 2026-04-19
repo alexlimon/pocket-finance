@@ -2,11 +2,13 @@
 /// <reference types="astro/client" />
 
 interface CloudflareEnv {
-  TURSO_DATABASE_URL: string;
-  TURSO_AUTH_TOKEN:   string;
-  PLAID_CLIENT_ID:    string;
-  PLAID_SECRET:       string;
-  PLAID_ENV:          'sandbox' | 'production';
+  TURSO_DATABASE_URL:  string;
+  TURSO_AUTH_TOKEN:    string;
+  PLAID_CLIENT_ID:     string;
+  PLAID_SECRET:        string;
+  PLAID_ENV:           'sandbox' | 'production';
+  GOOGLE_CLIENT_ID:    string | undefined;
+  GOOGLE_CLIENT_SECRET: string | undefined;
 }
 
 type Runtime = import('@astrojs/cloudflare').Runtime<CloudflareEnv>;
