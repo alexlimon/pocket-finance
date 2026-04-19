@@ -13,6 +13,7 @@ import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, type Monthly
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+return Astro.redirect('/budget');
 
 // ── 12-month window ──────────────────────────────────────────────────────────
 const thisMonth = currentMonth();
