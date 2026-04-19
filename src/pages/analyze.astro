@@ -2,6 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
+import { getGmailStatus } from '../lib/gmail';
 import CSVAnalyzer from '../components/CSVAnalyzer';
 
 const env = Astro.locals.runtime.env;
@@ -23,8 +24,15 @@ try {
 } finally {
   client.close();
 }
+
+const gmailStatus = await getGmailStatus(env);
+const initialGmailStatus = JSON.stringify(gmailStatus);
 ---
 
 <Layout title="Analyze" wide={true}>
-  <CSVAnalyzer initialTransactions={initialTransactions} client:load />
+  <CSVAnalyzer
+    initialTransactions={initialTransactions}
+    initialGmailStatus={initialGmailStatus}
+    client:load
+  />
 </Layout>
