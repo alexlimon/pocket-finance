@@ -13,7 +13,7 @@ import {
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
 
-Astro.locals.runtime.ctx.waitUntil(syncCCSpend(env));
+try { await syncCCSpend(env); } catch { /* non-fatal — page renders with cached data if Plaid is unavailable */ }
 
 const month    = Astro.url.searchParams.get('month') ?? currentMonth();
 const prev     = prevMonth(month);
@@ -37,6 +37,7 @@ let cashExpenses:     CashExpense[]  = [];
 let ccSettings:       { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
 let variableSpendRows:{ card: string; amount: number; updated_at: string | null }[] = [];
 let nextMonthCCBudget: number | null = null;
+let plaidSyncError:   string | null   = null;
 
 // ── Database fetches ─────────────────────────────────────────────────────────
 const BILLS_SELECT = `
@@ -55,7 +56,7 @@ const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_d
 let savedRecurringMode: 'estimated' | 'actual' | null = null;
 
 try {
-  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes] = await Promise.all([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes] = await Promise.all([
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
     client.execute({ sql: BILLS_QUERY, args: [month, month, month] }),
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -78,6 +79,8 @@ try {
     client.execute({ sql: CC_BILLS_QUERY, args: [next, next, next] }),
     // Saved est/actual toggle for this month
     client.execute({ sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] }),
+    // Plaid sync error from background sync (set by syncCCSpend when token invalid)
+    client.execute({ sql: `SELECT value FROM settings WHERE key = 'plaid_sync_error' LIMIT 1`, args: [] }),
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -106,6 +109,7 @@ try {
     nextMonthCCBudget = Number((nextSumRes.rows[0] as any).cc_budget) || null;
   }
 
+  if (plaidSyncErrRes.rows.length) plaidSyncError = String((plaidSyncErrRes.rows[0] as any).value);
   ccSettings        = settingsRes.rows     as unknown as typeof ccSettings;
   bigPurchases      = bigPurchasesRes.rows as unknown as BigPurchase[];
   cashExpenses      = cashRes.rows         as unknown as CashExpense[];
@@ -398,6 +402,14 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Variable Spend</h2>
     <a href="/connect" class="text-xs text-stone-400 hover:text-stone-500">Edit billing dates</a>
   </div>
+  {plaidSyncError && (
+    <div class="mb-3 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs">
+      <span class="text-amber-700">
+        {plaidSyncError === 'ITEM_LOGIN_REQUIRED' ? 'Bank re-authentication required — balances may be stale.' : 'Plaid sync error — balances may be stale.'}
+      </span>
+      <a href="/connect" class="ml-3 shrink-0 font-medium text-amber-700 underline hover:text-amber-900">Reconnect</a>
+    </div>
+  )}
 
   <div class="space-y-2" id="variable-spend-rows">
     {ccSettings.map(s => {
