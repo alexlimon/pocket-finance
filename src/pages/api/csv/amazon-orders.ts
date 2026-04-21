@@ -105,19 +105,25 @@ export async function POST(context: APIContext): Promise<Response> {
     shipmentRows.push({ messageId: `oh_${o.order_id}`, orderId: o.order_id, lastShip, total: o.total, itemsJson: JSON.stringify(o.items), subject });
   }
 
-  // ── Match in-memory (no extra DB round-trips) ──────────────────────────────
-  const txnRes = await (async () => {
+  // ── Load CC transactions + existing matches (to avoid stealing already-claimed txns) ──
+  const newOrderIds = [...orders.keys()];
+  const placeholders = newOrderIds.map(() => '?').join(',');
+  const { txnRes, existingMatchedTxnIds } = await (async () => {
     const client = getClient(env);
     try {
-      const [txnR] = await Promise.all([
+      const [txnR, existingR] = await Promise.all([
         client.execute(`SELECT id, date, amount FROM csv_transactions WHERE account_last4 = '3606'`),
+        newOrderIds.length > 0
+          ? client.execute({ sql: `SELECT txn_id FROM amazon_order_matches WHERE order_id NOT IN (${placeholders})`, args: newOrderIds })
+          : Promise.resolve({ rows: [] }),
       ]);
-      return txnR;
+      return { txnRes: txnR, existingMatchedTxnIds: existingR.rows as unknown as { txn_id: string }[] };
     } finally { client.close(); }
   })();
   const txns = txnRes.rows as unknown as { id: string; date: string; amount: number }[];
 
-  const usedTxns = new Set<string>();
+  // Pre-claim txns already matched to orders from *other* uploads
+  const usedTxns = new Set<string>(existingMatchedTxnIds.map(r => r.txn_id));
   const matchRows: { txnId: string; orderId: string }[] = [];
 
   for (const row of shipmentRows) {
@@ -132,12 +138,14 @@ export async function POST(context: APIContext): Promise<Response> {
     if (match) { usedTxns.add(match.id); matchRows.push({ txnId: match.id, orderId: row.orderId }); }
   }
 
-  // ── Single batch write: clear + insert all at once ─────────────────────────
+  // ── Single batch write: upsert shipments, refresh only this upload's matches ──
   const client = getClient(env);
   try {
+    const deleteMatchesForCurrentOrders = newOrderIds.length > 0
+      ? [{ sql: `DELETE FROM amazon_order_matches WHERE order_id IN (${placeholders})`, args: newOrderIds }]
+      : [];
     await client.batch([
-      { sql: `DELETE FROM amazon_shipments WHERE message_id LIKE 'oh_%'`, args: [] },
-      { sql: `DELETE FROM amazon_order_matches`, args: [] },
+      ...deleteMatchesForCurrentOrders,
       ...shipmentRows.map(r => ({
         sql:  `INSERT OR REPLACE INTO amazon_shipments (message_id, order_id, email_date, amount, items_json, email_subject) VALUES (?,?,?,?,?,?)`,
         args: [r.messageId, r.orderId, r.lastShip, r.total, r.itemsJson, r.subject],
