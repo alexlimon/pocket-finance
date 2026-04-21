@@ -35,7 +35,7 @@ let nextBills:        ResolvedBill[] = [];
 let bigPurchases:     BigPurchase[]  = [];
 let cashExpenses:     CashExpense[]  = [];
 let ccSettings:       { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
-let variableSpendRows:{ card: string; amount: number; updated_at: string | null }[] = [];
+let variableSpendRows:{ card: string; amount: number; updated_at: string | null; balance_updated_at: string | null }[] = [];
 let nextMonthCCBudget: number | null = null;
 let plaidSyncError:   string | null   = null;
 
@@ -157,7 +157,7 @@ const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRe
 const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
         variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
-const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.updated_at]));
+const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 ---
 
@@ -427,7 +427,7 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
               data-card={s.card} data-month={month}
             >{fmt(amount)}</span>
             {variableUpdatedAt.get(s.card) && (
-              <span class="synced-time text-xs text-stone-400 px-2" title="Last synced from Plaid" data-ts={variableUpdatedAt.get(s.card)}>
+              <span class="synced-time text-xs text-stone-400 px-2" title="Balance last updated by bank" data-ts={variableUpdatedAt.get(s.card)}>
                 synced …
               </span>
             )}
