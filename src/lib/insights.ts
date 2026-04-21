@@ -227,7 +227,7 @@ export function buildSankey(params: {
 // ── Scenario Projector (pure, client-safe) ───────────────────────────────────
 
 export type Scenario =
-  | { kind: 'recurring_expense'; label: string; amount: number; startMonth: string }
+  | { kind: 'recurring_expense'; label: string; amount: number; startMonth: string; isIncome?: boolean }
   | { kind: 'one_time_purchase'; label: string; amount: number; month: string }
   | { kind: 'income_change';     label: string; deltaPct: number; startMonth: string };
 
@@ -270,15 +270,13 @@ export interface ScenarioResult {
  * overlays changes on top of each month's real figures.
  */
 export function projectScenario(params: {
-  scenario:       Scenario;
+  scenarios:      Scenario[];
   monthBaselines: MonthBaseline[];
-  currentSurplus: number;
 }): ScenarioResult {
-  const { scenario, monthBaselines, currentSurplus } = params;
+  const { scenarios, monthBaselines } = params;
 
   const projections: MonthProjection[] = [];
   let cumDelta = 0;
-  let minCumDelta = 0;
 
   for (const mb of monthBaselines) {
     const [y, mo] = mb.month.split('-').map(Number);
@@ -287,20 +285,25 @@ export function projectScenario(params: {
     let sIncome   = mb.income;
     let sExpenses = mb.expenses;
 
-    if (scenario.kind === 'recurring_expense') {
-      if (mb.month >= scenario.startMonth) sExpenses += scenario.amount;
-    } else if (scenario.kind === 'one_time_purchase') {
-      if (mb.month === scenario.month) sExpenses += scenario.amount;
-    } else if (scenario.kind === 'income_change') {
-      if (mb.month >= scenario.startMonth) {
-        sIncome += mb.income * (scenario.deltaPct / 100);
+    for (const scenario of scenarios) {
+      if (scenario.kind === 'recurring_expense') {
+        if (mb.month >= scenario.startMonth) {
+          if (scenario.isIncome) sIncome += scenario.amount;
+          else sExpenses += scenario.amount;
+        }
+      } else if (scenario.kind === 'one_time_purchase') {
+        if (mb.month === scenario.month) sExpenses += scenario.amount;
+      } else if (scenario.kind === 'income_change') {
+        if (mb.month >= scenario.startMonth) {
+          sIncome += mb.income * (scenario.deltaPct / 100);
+        }
       }
     }
 
     const sNet  = sIncome - sExpenses;
     const delta = sNet - mb.net;
     cumDelta   += delta;
-    if (cumDelta < minCumDelta) minCumDelta = cumDelta;
+
 
     projections.push({
       month: mb.month, label,
@@ -314,15 +317,16 @@ export function projectScenario(params: {
   const eoyScenarioNet = projections.reduce((s, p) => s + p.scenarioNet, 0);
   const totalDelta     = eoyScenarioNet - eoyBaseNet;
 
-  const needsReserves = (currentSurplus + minCumDelta) < 0;
-  const reservesDraw  = needsReserves ? Math.abs(currentSurplus + minCumDelta) : 0;
+  // Affordability is judged on the year's total net, not month-by-month.
+  // If the year still ends positive after the new expense, you just save less —
+  // no reserves needed. Only when the full-year net goes negative do you need
+  // to draw from savings.
+  const needsReserves = eoyScenarioNet < 0;
+  const reservesDraw  = needsReserves ? Math.abs(eoyScenarioNet) : 0;
 
-  const avgBaseNet = monthBaselines.length
-    ? eoyBaseNet / monthBaselines.length
-    : 0;
   const verdict: ScenarioResult['verdict'] =
     needsReserves ? 'needs_reserves'
-    : totalDelta < -avgBaseNet ? 'tight'
+    : totalDelta < -(eoyBaseNet / (monthBaselines.length || 1)) ? 'tight'
     : 'comfortable';
 
   return { projections, totalDelta, eoyBaseNet, eoyScenarioNet, needsReserves, reservesDraw, verdict };
