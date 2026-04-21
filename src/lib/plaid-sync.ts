@@ -89,9 +89,19 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
     );
 
     const items = await client.execute({ sql: 'SELECT id, access_token, institution_name FROM plaid_items', args: [] });
+    let anyError: string | null = null;
+
     for (const item of items.rows) {
       const accessToken = String(item.access_token);
-      const accounts    = await getAccounts(accessToken, env);
+
+      let accounts: Awaited<ReturnType<typeof getAccounts>>;
+      try {
+        accounts = await getAccounts(accessToken, env);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        anyError = msg.includes('ITEM_LOGIN_REQUIRED') ? 'ITEM_LOGIN_REQUIRED' : 'SYNC_ERROR';
+        continue;
+      }
 
       // Backfill institution_name if missing
       if (!item.institution_name) {
@@ -132,6 +142,16 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
         sql:  `UPDATE plaid_items SET last_synced = strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id = ?`,
         args: [String(item.id)],
       });
+    }
+
+    // Persist or clear sync error so the UI can surface it on next page load
+    if (anyError) {
+      await client.execute({
+        sql:  `INSERT OR REPLACE INTO settings (key, value) VALUES ('plaid_sync_error', ?)`,
+        args: [anyError],
+      });
+    } else {
+      await client.execute({ sql: `DELETE FROM settings WHERE key = 'plaid_sync_error'`, args: [] });
     }
   } finally {
     client.close();
