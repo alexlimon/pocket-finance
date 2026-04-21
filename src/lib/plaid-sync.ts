@@ -19,9 +19,16 @@ interface CardSettings {
   payment_day:     number;
 }
 
+interface SpendEntry {
+  month:              string;
+  amount:             number;
+  /** Only set for the current-month entry in Phase 2 — the locked statement balance to snapshot. */
+  statementBalance:   number | null;
+  balanceUpdatedAt:   string | null;
+}
+
 interface SpendWrites {
-  /** month → amount pairs to upsert into cc_variable_spend */
-  entries: { month: string; amount: number }[];
+  entries: SpendEntry[];
 }
 
 /**
@@ -31,8 +38,12 @@ interface SpendWrites {
  *   current month ← limit - available
  *
  * Phase 2 — Statement closed, payment pending (billing_end_day → payment_day of next month):
- *   current month ← current_balance  (locked settled statement)
- *   next month    ← max(0, (limit - available) - current_balance)  (post-statement charges)
+ *   current month ← existingStatementBalance (locked on first Phase 2 sync, never updated again)
+ *   next month    ← max(0, (limit - available) - settled)  (post-statement charges)
+ *
+ *   existingStatementBalance is read from the DB before calling this function. If null (first
+ *   time entering Phase 2), Plaid's live `current` is snapshotted as the statement balance.
+ *   COALESCE in the upsert SQL ensures subsequent syncs never overwrite a stored snapshot.
  *
  * Phase 3 — After payment (after payment_day of next month):
  *   next month ← limit - available  (fresh cycle, no subtraction needed)
@@ -42,6 +53,8 @@ function computeSpendWrites(
   available: number,
   limit: number,
   settings: CardSettings,
+  existingStatementBalance: number | null,
+  balanceUpdatedAt: string | null,
 ): SpendWrites {
   const today      = new Date();
   const day        = today.getDate();
@@ -49,30 +62,33 @@ function computeSpendWrites(
   const next       = nextMonthDate(today);
   const nextMonth  = yyyyMM(next);
   const totalUsed  = Math.round((limit - available) * 100) / 100;
-  const settled    = Math.round(current * 100) / 100;
   const { billing_end_day, payment_day } = settings;
 
   // Phase 1: before statement closes
   if (day < billing_end_day) {
-    return { entries: [{ month: thisMonth, amount: totalUsed }] };
+    return { entries: [{ month: thisMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
   }
 
   // Determine if we're past the payment date in the next calendar month.
-  // payment_day refers to a day in the next calendar month relative to billing_end_day.
   const paymentDate = new Date(next.getFullYear(), next.getMonth(), payment_day);
   const pastPayment = today >= paymentDate;
 
   // Phase 3: after payment — fresh cycle
   if (pastPayment) {
-    return { entries: [{ month: nextMonth, amount: totalUsed }] };
+    return { entries: [{ month: nextMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
   }
 
-  // Phase 2: statement closed, payment still pending
+  // Phase 2: statement closed, payment still pending.
+  // Use the stored snapshot if available; otherwise snapshot Plaid's live current balance.
+  const settled       = existingStatementBalance !== null
+    ? existingStatementBalance
+    : Math.round(current * 100) / 100;
   const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
+
   return {
     entries: [
-      { month: thisMonth, amount: settled },
-      { month: nextMonth, amount: postStatement },
+      { month: thisMonth, amount: settled, statementBalance: settled, balanceUpdatedAt },
+      { month: nextMonth, amount: postStatement, statementBalance: null, balanceUpdatedAt },
     ],
   };
 }
@@ -85,6 +101,21 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
       settingsRes.rows.map(r => [
         String(r.card),
         { billing_end_day: Number(r.billing_end_day), payment_day: Number(r.payment_day) },
+      ])
+    );
+
+    // Pre-load stored statement_balances for the current month so Phase 2 uses the snapshot.
+    const thisMonth = yyyyMM(new Date());
+    const sbRes = await client.execute({
+      sql:  'SELECT card, statement_balance FROM cc_variable_spend WHERE month = ?',
+      args: [thisMonth],
+    });
+    const storedStatementBalances = new Map<string, number | null>(
+      sbRes.rows.map(r => [
+        String(r.card),
+        r.statement_balance !== null && r.statement_balance !== undefined
+          ? Number(r.statement_balance)
+          : null,
       ])
     );
 
@@ -122,18 +153,28 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
         const settings = settingsMap.get(mapping.card);
         if (!settings) continue;
 
+        const existingSB      = storedStatementBalances.get(mapping.card) ?? null;
+        const balanceUpdatedAt = acct.balances.balance_last_updated ?? null;
+
         const { entries } = computeSpendWrites(
           acct.balances.current   ?? 0,
           acct.balances.available ?? 0,
           acct.balances.limit     ?? 0,
           settings,
+          existingSB,
+          balanceUpdatedAt,
         );
 
-        for (const { month, amount } of entries) {
+        for (const { month, amount, statementBalance, balanceUpdatedAt: bua } of entries) {
           await client.execute({
-            sql:  `INSERT INTO cc_variable_spend (month, card, amount, updated_at) VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-                   ON CONFLICT(month, card) DO UPDATE SET amount = excluded.amount, updated_at = excluded.updated_at`,
-            args: [month, mapping.card, amount],
+            sql:  `INSERT INTO cc_variable_spend (month, card, amount, statement_balance, balance_updated_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+                   ON CONFLICT(month, card) DO UPDATE SET
+                     amount = excluded.amount,
+                     statement_balance    = COALESCE(cc_variable_spend.statement_balance, excluded.statement_balance),
+                     balance_updated_at   = excluded.balance_updated_at,
+                     updated_at           = excluded.updated_at`,
+            args: [month, mapping.card, amount, statementBalance, bua],
           });
         }
       }

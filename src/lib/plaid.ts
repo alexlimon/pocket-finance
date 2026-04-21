@@ -95,9 +95,10 @@ export interface PlaidAccount {
   type:          string;
   subtype:       string | null;
   balances: {
-    current:   number | null;
-    available: number | null;
-    limit:     number | null;
+    current:              number | null;
+    available:            number | null;
+    limit:                number | null;
+    balance_last_updated: string | null;
   };
 }
 
