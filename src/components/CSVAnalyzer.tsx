@@ -306,26 +306,26 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
       <p className="text-sm text-stone-500">
         Same vendor + same amount appearing in 2+ different months. Sorted by monthly cost.
       </p>
-      <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
-              <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
-              <th className="px-4 py-2.5 text-right font-medium">Amount</th>
-              <th className="px-4 py-2.5 text-center font-medium">Months seen</th>
-              <th className="px-4 py-2.5 text-right font-medium">Actual total</th>
-              <th className="px-4 py-2.5 text-right font-medium">Annual est.</th>
-              <th className="px-4 py-2.5 text-left font-medium">Acct</th>
+              <th className="px-2 py-2 text-left font-medium sm:px-4 sm:py-2.5">Vendor</th>
+              <th className="px-2 py-2 text-right font-medium sm:px-4 sm:py-2.5">Amount</th>
+              <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Months seen</th>
+              <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Actual total</th>
+              <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Annual est.</th>
+              <th className="px-2 py-2 text-left font-medium sm:px-4 sm:py-2.5">Acct</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
             {subs.map((s, i) => (
               <tr key={i} className="hover:bg-stone-50">
-                <td className="max-w-[220px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>
+                <td className="max-w-[140px] truncate px-2 py-2 font-medium text-stone-800 sm:max-w-[220px] sm:px-4 sm:py-2.5" title={s.vendor}>
                   {s.vendor}
                 </td>
-                <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">{fmt(s.amount)}</td>
-                <td className="px-4 py-2.5 text-center">
+                <td className="px-2 py-2 text-right tabular-nums text-stone-700 sm:px-4 sm:py-2.5">{fmt(s.amount)}</td>
+                <td className="hidden px-4 py-2.5 text-center sm:table-cell">
                   <div className="flex flex-wrap justify-center gap-1">
                     {s.months.map(m => (
                       <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">
@@ -334,9 +334,9 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
                     ))}
                   </div>
                 </td>
-                <td className="px-4 py-2.5 text-right tabular-nums text-stone-600">{fmt(s.total)}</td>
-                <td className="px-4 py-2.5 text-right tabular-nums text-stone-500">{fmt(s.amount * 12)}</td>
-                <td className="px-4 py-2.5">
+                <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-600 sm:table-cell">{fmt(s.total)}</td>
+                <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.amount * 12)}</td>
+                <td className="px-2 py-2 sm:px-4 sm:py-2.5">
                   <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">
                     ···{s.account_last4}
                   </span>
@@ -585,14 +585,14 @@ function AmazonPanel({
           All Transactions
           <span className="ml-2 font-normal text-stone-400">({data.allPurchases.length})</span>
         </h3>
-        <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+        <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
           <div className="max-h-[600px] overflow-y-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
-                <th className="px-4 py-2.5 text-left font-medium">Date</th>
-                <th className="px-4 py-2.5 text-left font-medium">Description / Items</th>
-                <th className="px-4 py-2.5 text-right font-medium">Amount</th>
+                <th className="px-2 py-2 text-left font-medium sm:px-4 sm:py-2.5">Date</th>
+                <th className="px-2 py-2 text-left font-medium sm:px-4 sm:py-2.5">Description / Items</th>
+                <th className="px-2 py-2 text-right font-medium sm:px-4 sm:py-2.5">Amount</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-stone-100">
@@ -605,9 +605,9 @@ function AmazonPanel({
                   : [];
                 return (
                   <tr key={t.id} className="hover:bg-stone-50">
-                    <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
-                    <td className="px-4 py-2.5">
-                      <div className="max-w-[320px]">
+                    <td className="whitespace-nowrap px-2 py-2 tabular-nums text-stone-500 sm:px-4 sm:py-2.5">{fmtDate(t.date)}</td>
+                    <td className="px-2 py-2 sm:px-4 sm:py-2.5">
+                      <div className="max-w-[200px] sm:max-w-[320px]">
                         <span className="truncate text-stone-500 text-xs font-mono" title={t.description}>{t.description}</span>
                         {match && (
                           <div className="mt-0.5">
@@ -625,7 +625,7 @@ function AmazonPanel({
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-2.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
+                    <td className="px-2 py-2 text-right tabular-nums font-medium text-stone-800 sm:px-4 sm:py-2.5">{fmt(Math.abs(t.amount))}</td>
                   </tr>
                 );
               })}
@@ -739,29 +739,32 @@ function TopPurchasesPanel({ txns }: { txns: CsvTransaction[] }) {
           </button>
         ))}
       </div>
-      <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
+      <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
-              <th className="px-4 py-2.5 text-left font-medium">Date</th>
-              <th className="px-4 py-2.5 text-left font-medium">Description</th>
-              <th className="px-4 py-2.5 text-left font-medium">Category</th>
-              <th className="px-4 py-2.5 text-left font-medium">Acct</th>
-              <th className="px-4 py-2.5 text-right font-medium">Amount</th>
+              <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Date</th>
+              <th className="px-2 py-2 text-left font-medium sm:px-4 sm:py-2.5">Description</th>
+              <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Category</th>
+              <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Acct</th>
+              <th className="px-2 py-2 text-right font-medium sm:px-4 sm:py-2.5">Amount</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
             {top.map(t => (
               <tr key={t.id} className="hover:bg-stone-50">
-                <td className="whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
-                <td className="max-w-[220px] truncate px-4 py-2.5 text-stone-700" title={t.description}>{t.description}</td>
-                <td className="px-4 py-2.5 text-stone-500">{t.category ?? '—'}</td>
-                <td className="px-4 py-2.5">
+                <td className="hidden whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500 sm:table-cell">{fmtDate(t.date)}</td>
+                <td className="px-2 py-2 sm:px-4 sm:py-2.5">
+                  <div className="max-w-[180px] truncate text-stone-700 sm:max-w-[220px]" title={t.description}>{t.description}</div>
+                  <div className="mt-0.5 text-[10px] text-stone-400 sm:hidden">{fmtDate(t.date)} · {t.category ?? '—'}</div>
+                </td>
+                <td className="hidden px-4 py-2.5 text-stone-500 sm:table-cell">{t.category ?? '—'}</td>
+                <td className="hidden px-4 py-2.5 sm:table-cell">
                   <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">
                     ···{t.account_last4}
                   </span>
                 </td>
-                <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-stone-800">
+                <td className="px-2 py-2 text-right tabular-nums font-semibold text-stone-800 sm:px-4 sm:py-2.5">
                   {fmt(Math.abs(t.amount))}
                 </td>
               </tr>
@@ -916,13 +919,15 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
 
       {/* Tabs + panels */}
       {transactions.length > 0 ? (
-        <div className="rounded-xl border border-stone-200 bg-white p-5">
-          <div className="mb-5 flex flex-wrap gap-1 border-b border-stone-100 pb-4">
-            {TABS.map(tab => (
-              <TabBtn key={tab.id} active={activeTab === tab.id} onClick={() => setActiveTab(tab.id)}>
-                {tab.label}
-              </TabBtn>
-            ))}
+        <div className="rounded-xl border border-stone-200 bg-white p-3 sm:p-5">
+          <div className="mb-4 overflow-x-auto sm:mb-5">
+            <div className="flex min-w-max gap-1 border-b border-stone-100 pb-3 sm:pb-4">
+              {TABS.map(tab => (
+                <TabBtn key={tab.id} active={activeTab === tab.id} onClick={() => setActiveTab(tab.id)}>
+                  {tab.label}
+                </TabBtn>
+              ))}
+            </div>
           </div>
           {activeTab === 'subscriptions' && <SubscriptionsPanel txns={enrichedTxns} />}
           {activeTab === 'categories'    && <CategoriesPanel    txns={enrichedTxns} />}
