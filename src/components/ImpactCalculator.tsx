@@ -3,12 +3,19 @@ import { projectScenario, fmtCurrency, type Scenario, type ScenarioResult, type 
 
 const CC_BASE = 5000;
 
+interface BillLineItem {
+  id:     string;
+  name:   string;
+  amount: number;
+}
+
 interface Props {
   monthBaselines: MonthBaseline[];
   reserves:       number;
+  recurringBills: BillLineItem[];
 }
 
-type TabKind = 'recurring' | 'onetime' | 'income_change' | 'cc_budget';
+type TabKind = 'recurring' | 'onetime' | 'income_change' | 'cc_budget' | 'emergency';
 
 interface RecurringItem {
   id:         string;
@@ -36,9 +43,10 @@ const TAB_LABELS: Record<TabKind, string> = {
   onetime:       'One-Time',
   income_change: 'Income Change',
   cc_budget:     'CC Budget',
+  emergency:     '🚨 Emergency',
 };
 
-export default function ImpactCalculator({ monthBaselines, reserves }: Props) {
+export default function ImpactCalculator({ monthBaselines, reserves, recurringBills }: Props) {
   const months = monthBaselines.map(m => m.month);
   const [tab, setTab] = useState<TabKind>('recurring');
 
@@ -63,6 +71,33 @@ export default function ImpactCalculator({ monthBaselines, reserves }: Props) {
 
   // ── CC budget ──
   const [ccExtra, setCcExtra] = useState(0);
+
+  // ── Emergency ──
+  const [emergAlex,  setEmergAlex]  = useState(true);
+  const [emergMaham, setEmergMaham] = useState(false);
+  const [emergCC,    setEmergCC]    = useState(true);
+  const [emergCash,  setEmergCash]  = useState(true);
+
+  // Derive per-person income and CC/cash averages from baselines
+  const avgIncomeAlex  = useMemo(() => {
+    const vals = monthBaselines.filter(m => m.incomeAlex != null);
+    return vals.length ? vals.reduce((s, m) => s + (m.incomeAlex ?? 0), 0) / vals.length : 0;
+  }, [monthBaselines]);
+  const avgIncomeMaham = useMemo(() => {
+    const vals = monthBaselines.filter(m => m.incomeMaham != null);
+    return vals.length ? vals.reduce((s, m) => s + (m.incomeMaham ?? 0), 0) / vals.length : 0;
+  }, [monthBaselines]);
+  const avgCCPayment = useMemo(() => {
+    const vals = monthBaselines.filter(m => m.ccPayment != null);
+    return vals.length ? vals.reduce((s, m) => s + (m.ccPayment ?? 0), 0) / vals.length : 0;
+  }, [monthBaselines]);
+  const avgCashOut = useMemo(() => {
+    const vals = monthBaselines.filter(m => m.cashOut != null);
+    return vals.length ? vals.reduce((s, m) => s + (m.cashOut ?? 0), 0) / vals.length : 0;
+  }, [monthBaselines]);
+
+  const [leanCC,   setLeanCC]   = useState<number | null>(null);
+  const [leanCash, setLeanCash] = useState<number | null>(null);
 
   const eoyBaseNet       = monthBaselines.reduce((s, m) => s + m.net, 0);
   const monthlyHeadroom  = monthBaselines.length > 0 ? eoyBaseNet / monthBaselines.length : 0;
@@ -301,6 +336,24 @@ export default function ImpactCalculator({ monthBaselines, reserves }: Props) {
             </label>
           </div>
         )}
+
+        {/* ── Emergency tab ── */}
+        {tab === 'emergency' && (
+          <EmergencyPanel
+            reserves={reserves}
+            recurringBills={recurringBills}
+            avgIncomeAlex={avgIncomeAlex}
+            avgIncomeMaham={avgIncomeMaham}
+            avgCCPayment={avgCCPayment}
+            avgCashOut={avgCashOut}
+            emergAlex={emergAlex}   setEmergAlex={setEmergAlex}
+            emergMaham={emergMaham} setEmergMaham={setEmergMaham}
+            emergCC={emergCC}       setEmergCC={setEmergCC}
+            emergCash={emergCash}   setEmergCash={setEmergCash}
+            leanCC={leanCC}         setLeanCC={setLeanCC}
+            leanCash={leanCash}     setLeanCash={setLeanCash}
+          />
+        )}
       </div>
 
       {/* Summary of all active items across tabs */}
@@ -326,10 +379,10 @@ export default function ImpactCalculator({ monthBaselines, reserves }: Props) {
       )}
 
       {/* Verdict */}
-      {showVerdict && <Verdict result={result} reserves={reserves} />}
+      {showVerdict && tab !== 'emergency' && <Verdict result={result} reserves={reserves} />}
 
       {/* Month-by-month table */}
-      {showVerdict && (
+      {showVerdict && tab !== 'emergency' && (
         <div className="overflow-x-auto -mx-1">
           <table className="w-full text-xs">
             <thead>
@@ -440,6 +493,252 @@ function Verdict({ result, reserves }: { result: ScenarioResult; reserves: numbe
         Your year-end net stays positive at {fmtCurrency(result.eoyScenarioNet, { compact: true })} — this comes out of what you'd save, not your reserves.
         {result.verdict === 'tight' && ' The hit is large relative to your average monthly net — watch closely.'}
       </p>
+    </div>
+  );
+}
+
+// ── Emergency Panel ───────────────────────────────────────────────────────────
+
+interface EmergencyPanelProps {
+  reserves:        number;
+  recurringBills:  BillLineItem[];
+  avgIncomeAlex:   number;
+  avgIncomeMaham:  number;
+  avgCCPayment:    number;
+  avgCashOut:      number;
+  emergAlex:  boolean; setEmergAlex:  (v: boolean) => void;
+  emergMaham: boolean; setEmergMaham: (v: boolean) => void;
+  emergCC:    boolean; setEmergCC:    (v: boolean) => void;
+  emergCash:  boolean; setEmergCash:  (v: boolean) => void;
+  leanCC:     number | null; setLeanCC:    (v: number | null) => void;
+  leanCash:   number | null; setLeanCash:  (v: number | null) => void;
+}
+
+function EmergencyPanel({
+  reserves,
+  recurringBills,
+  avgIncomeAlex, avgIncomeMaham,
+  avgCCPayment, avgCashOut,
+  emergAlex, setEmergAlex,
+  emergMaham, setEmergMaham,
+  emergCC, setEmergCC,
+  emergCash, setEmergCash,
+  leanCC, setLeanCC,
+  leanCash, setLeanCash,
+}: EmergencyPanelProps) {
+  // Per-bill enabled/amount state — keyed by bill id
+  const [billEnabled, setBillEnabled] = useState<Record<string, boolean>>(
+    () => Object.fromEntries(recurringBills.map(b => [b.id, true]))
+  );
+  const [billAmounts, setBillAmounts] = useState<Record<string, number>>(
+    () => Object.fromEntries(recurringBills.map(b => [b.id, b.amount]))
+  );
+
+  const toggleBill = (id: string) => setBillEnabled(prev => ({ ...prev, [id]: !prev[id] }));
+  const setBillAmt = (id: string, v: number) => setBillAmounts(prev => ({ ...prev, [id]: v }));
+
+  const lostIncome      = (emergAlex ? avgIncomeAlex : 0) + (emergMaham ? avgIncomeMaham : 0);
+  const remainingIncome = avgIncomeAlex + avgIncomeMaham - lostIncome;
+
+  const effectiveBills = recurringBills.reduce((s, b) => s + (billEnabled[b.id] ? (billAmounts[b.id] ?? b.amount) : 0), 0);
+  const effectiveCC    = emergCC   ? (leanCC   ?? avgCCPayment) : 0;
+  const effectiveCash  = emergCash ? (leanCash ?? avgCashOut)   : 0;
+  const totalExpenses  = effectiveBills + effectiveCC + effectiveCash;
+
+  const monthlyDeficit = totalExpenses - remainingIncome;
+  const survivalMonths = monthlyDeficit > 0 ? reserves / monthlyDeficit : Infinity;
+  const survivalYears  = survivalMonths / 12;
+
+  const scenarioLabel =
+    emergAlex && emergMaham ? 'Both lose jobs' :
+    emergAlex  ? 'Alex loses job' :
+    emergMaham ? 'Maham loses job' : 'No job loss selected';
+
+  const survivalColor =
+    survivalMonths < 3  ? 'text-brand-red' :
+    survivalMonths < 6  ? 'text-brand-yellow' :
+    'text-brand-green';
+
+  // Month-by-month burndown (cap at 36 months)
+  const burndown: { month: number; label: string; balance: number }[] = [];
+  if (monthlyDeficit > 0 && reserves > 0) {
+    let bal = reserves;
+    for (let i = 1; bal > 0 && i <= 36; i++) {
+      bal = Math.max(0, bal - monthlyDeficit);
+      const d = new Date();
+      d.setMonth(d.getMonth() + i);
+      burndown.push({ month: i, label: d.toLocaleString('en-US', { month: 'short', year: '2-digit' }), balance: bal });
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Who loses job */}
+      <div>
+        <p className="text-xs text-stone-400 mb-2">Who loses their job?</p>
+        <div className="flex gap-2">
+          {[
+            { label: 'Alex',  val: emergAlex,  set: setEmergAlex,  income: avgIncomeAlex  },
+            { label: 'Maham', val: emergMaham, set: setEmergMaham, income: avgIncomeMaham },
+          ].map(({ label, val, set, income }) => (
+            <button key={label} type="button" onClick={() => set(!val)}
+              className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition ${
+                val ? 'border-brand-red/40 bg-brand-red/5 text-brand-red' : 'border-surface-border text-stone-500 hover:border-stone-400'
+              }`}
+            >
+              <span className={`inline-flex h-3.5 w-3.5 items-center justify-center rounded border-2 text-[9px] ${val ? 'border-brand-red bg-brand-red text-white' : 'border-stone-300'}`}>
+                {val ? '✓' : ''}
+              </span>
+              {label}
+              <span className="tabular-nums text-xs opacity-60">{fmtCurrency(income, { compact: true })}/mo</span>
+            </button>
+          ))}
+        </div>
+        {!emergAlex && !emergMaham && (
+          <p className="mt-2 text-xs text-stone-400">Select at least one person to model a job loss.</p>
+        )}
+      </div>
+
+      {/* Lean expense buckets */}
+      <div>
+        <p className="text-xs text-stone-400 mb-2">Monthly expenses — uncheck to cut, or edit the amount</p>
+        <div className="space-y-1">
+          {/* Individual recurring bills */}
+          {recurringBills.length > 0 && (
+            <>
+              <p className="text-[11px] font-medium text-stone-400 px-1 pt-1">Fixed bills</p>
+              {recurringBills.map(bill => {
+                const enabled = billEnabled[bill.id] ?? true;
+                const amount  = billAmounts[bill.id] ?? bill.amount;
+                return (
+                  <div key={bill.id} className={`flex items-center gap-3 rounded-lg border px-3 py-2 transition ${enabled ? 'border-surface-border bg-surface-card' : 'border-surface-border/40 opacity-50'}`}>
+                    <button type="button" onClick={() => toggleBill(bill.id)}
+                      className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 text-[9px] transition ${enabled ? 'border-stone-600 bg-stone-700 text-white' : 'border-stone-300'}`}>
+                      {enabled ? '✓' : ''}
+                    </button>
+                    <span className="flex-1 text-sm text-stone-600">{bill.name}</span>
+                    <input
+                      type="number" step="10" min={0}
+                      value={amount}
+                      disabled={!enabled}
+                      onChange={e => setBillAmt(bill.id, Number(e.target.value))}
+                      className="w-28 rounded-md border border-surface-border bg-surface px-2 py-1 text-sm tabular-nums disabled:opacity-40"
+                    />
+                    <span className="text-xs text-stone-400 w-20 shrink-0">
+                      {amount !== bill.amount ? `(was ${fmtCurrency(bill.amount, { compact: true })})` : '/mo'}
+                    </span>
+                  </div>
+                );
+              })}
+            </>
+          )}
+
+          {/* CC and cash buckets */}
+          <p className="text-[11px] font-medium text-stone-400 px-1 pt-2">Other buckets</p>
+          {([
+            { label: 'CC payment',   enabled: emergCC,   setEnabled: setEmergCC,   avg: avgCCPayment, lean: leanCC,   setLean: setLeanCC   },
+            { label: 'Cash / other', enabled: emergCash, setEnabled: setEmergCash, avg: avgCashOut,   lean: leanCash, setLean: setLeanCash },
+          ] as const).map(({ label, enabled, setEnabled, avg, lean, setLean }) => (
+            <div key={label} className={`flex items-center gap-3 rounded-lg border px-3 py-2 transition ${enabled ? 'border-surface-border bg-surface-card' : 'border-surface-border/40 opacity-50'}`}>
+              <button type="button" onClick={() => setEnabled(!enabled)}
+                className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 text-[9px] transition ${enabled ? 'border-stone-600 bg-stone-700 text-white' : 'border-stone-300'}`}>
+                {enabled ? '✓' : ''}
+              </button>
+              <span className="flex-1 text-sm text-stone-600">{label}</span>
+              <input
+                type="number" step="50" min={0}
+                value={lean ?? Math.round(avg)}
+                disabled={!enabled}
+                onChange={e => setLean(Number(e.target.value))}
+                className="w-28 rounded-md border border-surface-border bg-surface px-2 py-1 text-sm tabular-nums disabled:opacity-40"
+              />
+              <span className="text-xs text-stone-400 w-20 shrink-0">
+                {lean != null && lean !== avg ? `(was ${fmtCurrency(avg, { compact: true })})` : '/mo avg'}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Results */}
+      {(emergAlex || emergMaham) && (
+        <div className="rounded-xl border-2 border-stone-200 bg-stone-50 p-4 space-y-3">
+          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">{scenarioLabel}</p>
+
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <div>
+              <p className="text-xs text-stone-400">Remaining income</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-stone-700">{fmtCurrency(remainingIncome, { compact: true })}/mo</p>
+              <p className="mt-0.5 text-[10px] text-stone-400">from income_alex / income_maham in monthly summary</p>
+            </div>
+            <div>
+              <p className="text-xs text-stone-400">Lean expenses</p>
+              <p className="mt-1 text-lg font-semibold tabular-nums text-stone-700">{fmtCurrency(totalExpenses, { compact: true })}/mo</p>
+            </div>
+            <div>
+              <p className="text-xs text-stone-400">Monthly deficit</p>
+              <p className={`mt-1 text-lg font-semibold tabular-nums ${monthlyDeficit > 0 ? 'text-brand-red' : 'text-brand-green'}`}>
+                {monthlyDeficit > 0 ? fmtCurrency(monthlyDeficit, { compact: true }) : 'None'}
+              </p>
+            </div>
+          </div>
+
+          <div className={`rounded-lg border-2 p-4 text-center ${
+            survivalMonths < 3  ? 'border-brand-red/40 bg-brand-red/5' :
+            survivalMonths < 6  ? 'border-brand-yellow/40 bg-brand-yellow/5' :
+            'border-brand-green/30 bg-brand-green/5'
+          }`}>
+            {monthlyDeficit <= 0 ? (
+              <p className="text-sm font-medium text-brand-green">No reserves needed — remaining income covers all expenses.</p>
+            ) : (
+              <>
+                <p className="text-xs text-stone-400">Reserves last</p>
+                <p className={`mt-1 text-4xl font-bold tabular-nums ${survivalColor}`}>
+                  {survivalMonths >= 36 ? `${survivalYears.toFixed(1)} yrs` : `${survivalMonths.toFixed(1)} mo`}
+                </p>
+                <p className="mt-1 text-xs text-stone-500">
+                  {fmtCurrency(reserves, { compact: true })} ÷ {fmtCurrency(monthlyDeficit, { compact: true })}/mo deficit
+                </p>
+              </>
+            )}
+          </div>
+
+          {burndown.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-b border-surface-border text-stone-400">
+                    <th className="px-2 py-1.5 text-left font-medium">Month</th>
+                    <th className="px-2 py-1.5 text-right font-medium">Reserves left</th>
+                    <th className="px-2 py-1.5 pl-3 text-left font-medium" aria-hidden="true" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {burndown.map(row => {
+                    const pct = Math.round((row.balance / reserves) * 100);
+                    const barColor = pct > 50 ? 'bg-brand-green' : pct > 20 ? 'bg-brand-yellow' : 'bg-brand-red';
+                    return (
+                      <tr key={row.month} className="border-b border-surface-border/50">
+                        <td className="px-2 py-1.5 font-medium text-stone-600">{row.label}</td>
+                        <td className={`px-2 py-1.5 text-right tabular-nums font-medium ${
+                          pct > 50 ? 'text-brand-green' : pct > 20 ? 'text-brand-yellow' : 'text-brand-red'
+                        }`}>
+                          {row.balance > 0 ? fmtCurrency(row.balance, { compact: true }) : '—'}
+                        </td>
+                        <td className="px-2 py-1.5 pl-3 w-32">
+                          <div className="h-1.5 w-full rounded-full bg-stone-200">
+                            <div className={`h-full rounded-full transition-all ${barColor}`} style={{ width: `${pct}%` }} />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

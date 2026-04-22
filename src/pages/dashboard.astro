@@ -166,9 +166,10 @@ const monthBaselines: DetailedBaseline[] = futureMonths.map(m => {
   const summary = sumMap.get(m);
 
   // Income: salary (from monthly_summary) + cash income entries
-  const salary    = summary ? Number(summary.income_alex) + Number(summary.income_maham) : 0;
-  const cashIncome = (cashByM[m] ?? []).filter(e => e.type === 'income').reduce((s, e) => s + e.amount, 0);
-  const income    = salary + cashIncome;
+  const incomeAlex  = summary ? Number(summary.income_alex)  : 0;
+  const incomeMaham = summary ? Number(summary.income_maham) : 0;
+  const cashIncome  = (cashByM[m] ?? []).filter(e => e.type === 'income').reduce((s, e) => s + e.amount, 0);
+  const income      = incomeAlex + incomeMaham + cashIncome;
 
   // Expenses: checking bills + CC payment + cash expenses (non-income)
   const bills = resolvedBillsForMonth(m);
@@ -179,8 +180,24 @@ const monthBaselines: DetailedBaseline[] = futureMonths.map(m => {
   const cashOut       = (cashByM[m] ?? []).filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   const expenses      = checkingBills + ccPayment + cashOut;
 
-  return { month: m, income, expenses, net: income - expenses, checkingBills, ccPayment, cashOut };
+  return { month: m, income, expenses, net: income - expenses, incomeAlex, incomeMaham, checkingBills, ccPayment, cashOut };
 });
+
+// ── Individual recurring bill line items for the emergency panel ─────────────
+// Uses the current month's actuals (or monthly_target as fallback), non-CC only.
+const recurringBills = billConfigs
+  .filter(bc => {
+    if (CC_PAYMENT_RE.test(bc.name)) return false;
+    if (bc.is_cc_default) return false;
+    if (bc.start_month && thisMonth < bc.start_month) return false;
+    if (bc.end_month   && thisMonth > bc.end_month)   return false;
+    return (bc.monthly_target ?? 0) > 0;
+  })
+  .flatMap(bc => {
+    const pay = billPayMap.get(`${thisMonth}|${bc.id}`);
+    if (pay?.is_skipped) return [];
+    return [{ id: bc.id, name: bc.name, amount: pay ? pay.amount : Number(bc.monthly_target ?? 0) }];
+  });
 
 // ── Safe to Spend (current month) — uses budget-page formula ─────────────────
 const curBL = monthBaselines[0];  // first entry = thisMonth
@@ -459,6 +476,7 @@ const baseLabel =
       client:load
       monthBaselines={monthBaselines}
       reserves={reserves}
+      recurringBills={recurringBills}
     />
   </div>
 </Layout>
