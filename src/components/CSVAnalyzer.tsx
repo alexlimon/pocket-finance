@@ -636,10 +636,8 @@ function StatementsPanel({ txns }: { txns: CsvTransaction[] }) {
 
 interface VendorSpend {
   vendor: string;
-  normalized: string;
   total: number;
   count: number;
-  months: string[];
   accounts: string[];
 }
 
@@ -652,16 +650,13 @@ function findTopVendors(txns: CsvTransaction[], year: string): VendorSpend[] {
     byVendor.get(key)!.push(t);
   }
   const results: VendorSpend[] = [];
-  for (const [normalized, rows] of byVendor) {
-    const months = [...new Set(rows.map(t => t.date.slice(0, 7)))].sort();
+  for (const [, rows] of byVendor) {
     const accounts = [...new Set(rows.map(t => t.account_last4))];
     const vendor = rows.reduce((best, t) => t.description.length > best.length ? t.description : best, '');
     results.push({
       vendor,
-      normalized,
       total: Math.round(rows.reduce((s, t) => s + Math.abs(t.amount), 0) * 100) / 100,
       count: rows.length,
-      months,
       accounts,
     });
   }
@@ -707,7 +702,6 @@ function TopVendorsPanel({ txns }: { txns: CsvTransaction[] }) {
                   <th className="px-4 py-2.5 text-right font-medium">Total</th>
                   <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">% of spend</th>
                   <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Txns</th>
-                  <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Months</th>
                   <th className="px-4 py-2.5 text-left font-medium">Acct</th>
                 </tr>
               </thead>
@@ -720,13 +714,6 @@ function TopVendorsPanel({ txns }: { txns: CsvTransaction[] }) {
                       {grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0.0'}%
                     </td>
                     <td className="hidden px-4 py-2.5 text-center tabular-nums text-stone-500 sm:table-cell">{v.count}</td>
-                    <td className="hidden px-4 py-2.5 text-center sm:table-cell">
-                      <div className="flex flex-wrap justify-center gap-1">
-                        {v.months.map(m => (
-                          <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{monthLabel(m)}</span>
-                        ))}
-                      </div>
-                    </td>
                     <td className="px-4 py-2.5">
                       <div className="flex flex-wrap gap-1">
                         {v.accounts.map(a => (
