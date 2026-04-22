@@ -78,6 +78,8 @@ export async function POST(context: APIContext): Promise<Response> {
 
   // Types to skip for checking accounts: credit card payments and savings transfers
   const CHECKING_SKIP_TYPES = new Set(['LOAN_PMT', 'ACCT_XFER']);
+  // Description substrings to skip for checking accounts: mortgage payments
+  const CHECKING_SKIP_DESC = ['JPMORGAN CHASE   CHASE ACH', 'PROVIDENT FUNDIN ACH PMT'];
 
   const client = getClient(env);
   let inserted = 0;
@@ -98,8 +100,9 @@ export async function POST(context: APIContext): Promise<Response> {
       const amount = parseFloat(rawAmount);
       if (isNaN(amount)) continue;
 
-      // Skip CC payments and savings transfers for checking accounts
+      // Skip CC payments, savings transfers, and mortgage payments for checking accounts
       if (isChecking && CHECKING_SKIP_TYPES.has(type)) { skipped++; continue; }
+      if (isChecking && CHECKING_SKIP_DESC.some(s => desc.includes(s))) { skipped++; continue; }
 
       const date     = parseDate(rawDate);
       const postDate = rawPost ? parseDate(rawPost) : null;
