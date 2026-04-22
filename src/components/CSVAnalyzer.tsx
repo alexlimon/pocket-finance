@@ -32,7 +32,7 @@ interface AmazonMatch {
   all_items_raw:  string | null;
 }
 
-type Tab = 'upload' | 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top' | 'mortgage';
+type Tab = 'upload' | 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top' | 'vendors' | 'mortgage';
 
 interface Props {
   initialTransactions: string;
@@ -632,6 +632,122 @@ function StatementsPanel({ txns }: { txns: CsvTransaction[] }) {
   );
 }
 
+// ── Computations: Top Vendors ─────────────────────────────────────────────────
+
+interface VendorSpend {
+  vendor: string;
+  normalized: string;
+  total: number;
+  count: number;
+  months: string[];
+  accounts: string[];
+}
+
+function findTopVendors(txns: CsvTransaction[], year: string): VendorSpend[] {
+  const filtered = txns.filter(t => isPurchase(t) && (year === 'all' || t.date.startsWith(year)));
+  const byVendor = new Map<string, CsvTransaction[]>();
+  for (const t of filtered) {
+    const key = normalizeVendor(t.description);
+    if (!byVendor.has(key)) byVendor.set(key, []);
+    byVendor.get(key)!.push(t);
+  }
+  const results: VendorSpend[] = [];
+  for (const [normalized, rows] of byVendor) {
+    const months = [...new Set(rows.map(t => t.date.slice(0, 7)))].sort();
+    const accounts = [...new Set(rows.map(t => t.account_last4))];
+    const vendor = rows.reduce((best, t) => t.description.length > best.length ? t.description : best, '');
+    results.push({
+      vendor,
+      normalized,
+      total: Math.round(rows.reduce((s, t) => s + Math.abs(t.amount), 0) * 100) / 100,
+      count: rows.length,
+      months,
+      accounts,
+    });
+  }
+  return results.sort((a, b) => b.total - a.total).slice(0, 40);
+}
+
+// ── Panel: Top Vendors ────────────────────────────────────────────────────────
+
+function TopVendorsPanel({ txns }: { txns: CsvTransaction[] }) {
+  const years = useMemo(() => {
+    const ys = [...new Set(txns.map(t => t.date.slice(0, 4)))].sort().reverse();
+    return ys;
+  }, [txns]);
+  const [year, setYear] = useState<string>('all');
+
+  const vendors = useMemo(() => findTopVendors(txns, year), [txns, year]);
+  const grandTotal = useMemo(() => vendors.reduce((s, v) => s + v.total, 0), [vendors]);
+
+  if (!txns.length) return <EmptyState message="No transaction data yet." />;
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button onClick={() => setYear('all')}
+          className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors
+            ${year === 'all' ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'}`}>
+          All time
+        </button>
+        {years.map(y => (
+          <button key={y} onClick={() => setYear(y)}
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors
+              ${year === y ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'}`}>
+            {y}
+          </button>
+        ))}
+      </div>
+      {!vendors.length ? <EmptyState message="No spend found for this period." /> : (
+        <>
+          <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
+                  <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
+                  <th className="px-4 py-2.5 text-right font-medium">Total</th>
+                  <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">% of spend</th>
+                  <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Txns</th>
+                  <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Months</th>
+                  <th className="px-4 py-2.5 text-left font-medium">Acct</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-stone-100">
+                {vendors.map((v, i) => (
+                  <tr key={i} className="hover:bg-stone-50">
+                    <td className="max-w-[220px] truncate px-4 py-2.5 font-medium text-stone-800" title={v.vendor}>{v.vendor}</td>
+                    <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">{fmt(v.total)}</td>
+                    <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">
+                      {grandTotal > 0 ? (v.total / grandTotal * 100).toFixed(1) : '0.0'}%
+                    </td>
+                    <td className="hidden px-4 py-2.5 text-center tabular-nums text-stone-500 sm:table-cell">{v.count}</td>
+                    <td className="hidden px-4 py-2.5 text-center sm:table-cell">
+                      <div className="flex flex-wrap justify-center gap-1">
+                        {v.months.map(m => (
+                          <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{monthLabel(m)}</span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <div className="flex flex-wrap gap-1">
+                        {v.accounts.map(a => (
+                          <span key={a} className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{a}</span>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-stone-400">
+            Top {vendors.length} vendors · Total: {fmt(grandTotal)}
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Panel: Top Purchases ──────────────────────────────────────────────────────
 
 function TopPurchasesPanel({ txns }: { txns: CsvTransaction[] }) {
@@ -692,6 +808,7 @@ function TopPurchasesPanel({ txns }: { txns: CsvTransaction[] }) {
 const NAV_ITEMS: { id: Tab; label: string; icon: string }[] = [
   { id: 'subscriptions', label: 'Subscriptions', icon: '↻' },
   { id: 'categories',    label: 'Categories',    icon: '◫' },
+  { id: 'vendors',       label: 'Top Vendors',   icon: '⊕' },
   { id: 'top',           label: 'Top Purchases', icon: '↓' },
   { id: 'amazon',        label: 'Amazon',        icon: '⊡' },
   { id: 'statements',    label: 'Statements',    icon: '≡' },
@@ -803,6 +920,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
     amazon:        'Amazon',
     statements:    'Statements',
     top:           'Top Purchases',
+    vendors:       'Top Vendors',
     mortgage:      'Mortgage Calculator',
   };
 
@@ -869,6 +987,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
           />
         )}
         {activeTab === 'statements'    && <StatementsPanel    txns={enrichedTxns} />}
+        {activeTab === 'vendors'       && <TopVendorsPanel    txns={enrichedTxns} />}
         {activeTab === 'top'           && <TopPurchasesPanel  txns={enrichedTxns} />}
         {activeTab === 'mortgage'      && <MortgageCalculator />}
       </div>
