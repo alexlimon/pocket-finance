@@ -61,8 +61,11 @@ export async function POST(context: APIContext): Promise<Response> {
   const header = parseCSVLine(lines[0]!).map(h => h.toLowerCase().replace(/\s+/g, '_'));
   const col = (name: string) => header.indexOf(name);
 
-  const dateIdx   = col('transaction_date');
-  const postIdx   = col('post_date');
+  // Detect checking format (Chase checking export uses "Posting Date" not "Transaction Date")
+  const isChecking = col('posting_date') !== -1 && col('transaction_date') === -1;
+
+  const dateIdx   = isChecking ? col('posting_date') : col('transaction_date');
+  const postIdx   = isChecking ? -1 : col('post_date');
   const descIdx   = col('description');
   const catIdx    = col('category');
   const typeIdx   = col('type');
@@ -70,8 +73,11 @@ export async function POST(context: APIContext): Promise<Response> {
   const memoIdx   = col('memo');
 
   if (dateIdx === -1 || descIdx === -1 || amountIdx === -1) {
-    return json({ error: 'CSV missing required columns (Transaction Date, Description, Amount)' }, 400);
+    return json({ error: 'CSV missing required columns (Transaction Date / Posting Date, Description, Amount)' }, 400);
   }
+
+  // Types to skip for checking accounts: credit card payments and savings transfers
+  const CHECKING_SKIP_TYPES = new Set(['LOAN_PMT', 'ACCT_XFER']);
 
   const client = getClient(env);
   let inserted = 0;
@@ -91,6 +97,9 @@ export async function POST(context: APIContext): Promise<Response> {
       if (!rawDate || !desc) continue;
       const amount = parseFloat(rawAmount);
       if (isNaN(amount)) continue;
+
+      // Skip CC payments and savings transfers for checking accounts
+      if (isChecking && CHECKING_SKIP_TYPES.has(type)) { skipped++; continue; }
 
       const date     = parseDate(rawDate);
       const postDate = rawPost ? parseDate(rawPost) : null;
