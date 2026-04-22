@@ -159,11 +159,11 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
 
   return (
     <div className="space-y-4 text-sm">
-      {/* Tab switcher */}
-      <div className="flex flex-wrap gap-1">
+      {/* Tab switcher — horizontal scroll on mobile */}
+      <div className="flex gap-1 overflow-x-auto pb-0.5 [scrollbar-width:none] [-webkit-overflow-scrolling:touch]">
         {(Object.keys(TAB_LABELS) as TabKind[]).map(k => (
           <button key={k} type="button" onClick={() => setTab(k)}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+            className={`shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition ${
               tab === k ? 'bg-stone-800 text-white' : 'bg-surface border border-surface-border text-stone-500 hover:text-stone-700'
             }`}
           >

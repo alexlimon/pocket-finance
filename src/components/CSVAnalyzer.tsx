@@ -807,10 +807,26 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
   };
 
   return (
-    <div className="flex gap-6 min-h-[600px]">
+    <div className="flex flex-col md:flex-row gap-4 md:gap-6 min-h-[600px]">
 
-      {/* ── Left nav ── */}
-      <nav className="w-44 shrink-0">
+      {/* ── Mobile: horizontal scroll tabs ── */}
+      <div className="md:hidden flex gap-1 overflow-x-auto pb-0.5 [scrollbar-width:none] [-webkit-overflow-scrolling:touch]">
+        {NAV_ITEMS.map(item => (
+          <button key={item.id} type="button" onClick={() => setActiveTab(item.id)}
+            className={`shrink-0 flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+              activeTab === item.id
+                ? 'bg-stone-800 text-white'
+                : 'border border-surface-border text-stone-500'
+            }`}
+          >
+            <span className="text-base leading-none opacity-70">{item.icon}</span>
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Desktop: left nav ── */}
+      <nav className="hidden md:block w-44 shrink-0">
         <div className="sticky top-6 space-y-0.5">
           {NAV_ITEMS.map(item => (
             <button key={item.id} type="button" onClick={() => setActiveTab(item.id)}
