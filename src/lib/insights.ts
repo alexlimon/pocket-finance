@@ -233,10 +233,15 @@ export type Scenario =
 
 /** Per-month baseline from actual budget data. */
 export interface MonthBaseline {
-  month:    string;   // 'YYYY-MM'
-  income:   number;   // total inflow (salary + other cash income)
-  expenses: number;   // total outflow (fixed + subs + variable)
-  net:      number;   // income − expenses (pre-savings surplus)
+  month:         string;   // 'YYYY-MM'
+  income:        number;   // total inflow (salary + other cash income)
+  expenses:      number;   // total outflow (fixed + subs + variable)
+  net:           number;   // income − expenses (pre-savings surplus)
+  incomeAlex?:   number;
+  incomeMaham?:  number;
+  checkingBills?: number;
+  ccPayment?:    number;
+  cashOut?:      number;
 }
 
 export interface MonthProjection {
