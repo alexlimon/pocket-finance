@@ -76,6 +76,7 @@ function normalizeVendor(desc: string): string {
     .replace(/\*[A-Z0-9]+$/, '')
     .replace(/\s+#?\d{4,}$/, '')
     .replace(/\s+[A-Z]{2}$/, '')
+    .replace(/\s+[A-Z0-9]{8,}$/, '')  // strip Zelle/ACH reference IDs (e.g. JPM99CBRFI5B)
     .trim();
 }
 
