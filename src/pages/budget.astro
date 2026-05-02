@@ -159,6 +159,19 @@ const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMo
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
+
+// ── CC statement pacing ───────────────────────────────────────────────────────
+const [pacYr, pacMo] = month.split('-').map(Number);
+const cycleStart = new Date(pacYr, pacMo - 2, defaultBillingEndDay + 1);
+const cycleEnd   = new Date(pacYr, pacMo - 1, defaultBillingEndDay);
+const pacingTotalDays = Math.round((cycleEnd.getTime() - cycleStart.getTime()) / 86400000) + 1;
+const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
+const pacingDaysElapsed = isNow
+  ? Math.max(1, Math.min(Math.round((todayMid.getTime() - cycleStart.getTime()) / 86400000) + 1, pacingTotalDays))
+  : pacingTotalDays;
+const pacingDailyRate = ccSpendBudget / pacingTotalDays;
+const pacingExpected  = pacingDailyRate * pacingDaysElapsed;
+const pacingVariance  = ccUsed - pacingExpected; // positive = over pace
 ---
 
 <Layout title={label}>
@@ -472,6 +485,21 @@ const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation 
     <div id="cc-bar" class={`h-full rounded-full transition-all ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
       style={`width:${ccUsedPct.toFixed(1)}%`}></div>
   </div>
+  <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400"
+    id="cc-pacing-row"
+    data-pacing-total-days={pacingTotalDays}
+    data-pacing-days-elapsed={pacingDaysElapsed}
+  >
+    <span><span id="cc-daily-rate" class="font-medium text-stone-600">{fmt(pacingDailyRate)}</span>/day</span>
+    <span class="text-stone-300">·</span>
+    <span>day {pacingDaysElapsed} of {pacingTotalDays}</span>
+    <span class="text-stone-300">·</span>
+    <span>expected so far: <span id="cc-pacing-expected" class="font-medium text-stone-600">{fmt(pacingExpected)}</span></span>
+    <span class="text-stone-300">·</span>
+    <span id="cc-pacing-variance" class={`font-medium ${pacingVariance > 50 ? 'text-brand-red' : pacingVariance < -50 ? 'text-brand-green' : 'text-stone-500'}`}>
+      {Math.abs(pacingVariance) < 1 ? 'on pace' : pacingVariance > 0 ? `${fmt(pacingVariance)} over` : `${fmt(-pacingVariance)} under`}
+    </span>
+  </div>
   <p class="mt-1 text-xs text-stone-400">Variable spend + big purchases count against budget. Recurring subscriptions are separate.</p>
 </div>
 
@@ -661,6 +689,25 @@ function recomputeCC() {
   const totEl = document.getElementById('cc-total-val');     if (totEl) totEl.textContent = usd(total);
   const bar   = document.getElementById('cc-bar') as HTMLElement;
   if (bar) { bar.style.width = pct.toFixed(1)+'%'; bar.className = bar.className.replace(/bg-brand-\w+/g,'')+(pct>=100?' bg-brand-red':pct>=80?' bg-brand-yellow':' bg-brand-green'); }
+
+  // Pacing row
+  const pacingRow = document.getElementById('cc-pacing-row') as HTMLElement | null;
+  if (pacingRow) {
+    const totalDays   = parseInt(pacingRow.dataset.pacingTotalDays ?? '30');
+    const daysElapsed = parseInt(pacingRow.dataset.pacingDaysElapsed ?? '1');
+    const dailyRate   = budget / totalDays;
+    const expected    = dailyRate * daysElapsed;
+    const variance    = total - expected;
+    const dailyEl = document.getElementById('cc-daily-rate');
+    if (dailyEl) dailyEl.textContent = usd(dailyRate);
+    const expEl = document.getElementById('cc-pacing-expected');
+    if (expEl) expEl.textContent = usd(expected);
+    const varEl3 = document.getElementById('cc-pacing-variance') as HTMLElement | null;
+    if (varEl3) {
+      varEl3.textContent = Math.abs(variance) < 1 ? 'on pace' : variance > 0 ? usd(variance)+' over' : usd(-variance)+' under';
+      varEl3.className = varEl3.className.replace(/text-brand-\w+|text-stone-\d+/g,'') + (variance > 50 ? 'text-brand-red' : variance < -50 ? 'text-brand-green' : 'text-stone-500');
+    }
+  }
 }
 
 // ── Estimated / Actual recurring toggle ──────────────────────────────────────
