@@ -54,6 +54,7 @@ function computeSpendWrites(
   limit: number,
   settings: CardSettings,
   existingStatementBalance: number | null,
+  prevMonthStatementBalance: number | null,
   balanceUpdatedAt: string | null,
 ): SpendWrites {
   const today      = new Date();
@@ -61,10 +62,28 @@ function computeSpendWrites(
   const thisMonth  = yyyyMM(today);
   const next       = nextMonthDate(today);
   const nextMonth  = yyyyMM(next);
+  const prev       = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+  const prevMonth  = yyyyMM(prev);
   const totalUsed  = Math.round((limit - available) * 100) / 100;
   const { billing_end_day, payment_day } = settings;
 
-  // Phase 1: before statement closes
+  // Phase 2 carryover: before billing_end_day of current month AND before payment_day —
+  // the previous month's statement has closed but hasn't been paid yet.
+  // Example: billing_end_day=18, payment_day=15 → May 1–14 is still paying the April statement.
+  if (day < billing_end_day && day < payment_day) {
+    const settled       = prevMonthStatementBalance !== null
+      ? prevMonthStatementBalance
+      : Math.round(current * 100) / 100;
+    const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
+    return {
+      entries: [
+        { month: prevMonth, amount: settled, statementBalance: settled, balanceUpdatedAt },
+        { month: thisMonth, amount: postStatement, statementBalance: null, balanceUpdatedAt },
+      ],
+    };
+  }
+
+  // Phase 1: before statement closes (and payment for prev statement already made)
   if (day < billing_end_day) {
     return { entries: [{ month: thisMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
   }
@@ -78,7 +97,7 @@ function computeSpendWrites(
     return { entries: [{ month: nextMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
   }
 
-  // Phase 2: statement closed, payment still pending.
+  // Phase 2: statement just closed this month, payment still pending next month.
   // Use the stored snapshot if available; otherwise snapshot Plaid's live current balance.
   const settled       = existingStatementBalance !== null
     ? existingStatementBalance
@@ -104,20 +123,24 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
       ])
     );
 
-    // Pre-load stored statement_balances for the current month so Phase 2 uses the snapshot.
-    const thisMonth = yyyyMM(new Date());
+    // Pre-load stored statement_balances for the current and previous month.
+    // Current month's snapshot is used for Phase 2 (statement just closed).
+    // Previous month's snapshot is used for Phase 2 carryover (paying last month's statement).
+    const today        = new Date();
+    const thisMonth    = yyyyMM(today);
+    const prevMonthStr = yyyyMM(new Date(today.getFullYear(), today.getMonth() - 1, 1));
     const sbRes = await client.execute({
-      sql:  'SELECT card, statement_balance FROM cc_variable_spend WHERE month = ?',
-      args: [thisMonth],
+      sql:  'SELECT card, month, statement_balance FROM cc_variable_spend WHERE month IN (?, ?)',
+      args: [thisMonth, prevMonthStr],
     });
-    const storedStatementBalances = new Map<string, number | null>(
-      sbRes.rows.map(r => [
-        String(r.card),
-        r.statement_balance !== null && r.statement_balance !== undefined
-          ? Number(r.statement_balance)
-          : null,
-      ])
-    );
+    const storedStatementBalances     = new Map<string, number | null>();
+    const prevMonthStatementBalances  = new Map<string, number | null>();
+    for (const r of sbRes.rows) {
+      const val = r.statement_balance !== null && r.statement_balance !== undefined
+        ? Number(r.statement_balance) : null;
+      if (String(r.month) === thisMonth)    storedStatementBalances.set(String(r.card), val);
+      if (String(r.month) === prevMonthStr) prevMonthStatementBalances.set(String(r.card), val);
+    }
 
     const items = await client.execute({ sql: 'SELECT id, access_token, institution_name FROM plaid_items', args: [] });
     let anyError: string | null = null;
@@ -154,6 +177,7 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
         if (!settings) continue;
 
         const existingSB      = storedStatementBalances.get(mapping.card) ?? null;
+        const prevSB          = prevMonthStatementBalances.get(mapping.card) ?? null;
         const balanceUpdatedAt = acct.balances.balance_last_updated ?? null;
 
         const { entries } = computeSpendWrites(
@@ -162,6 +186,7 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
           acct.balances.limit     ?? 0,
           settings,
           existingSB,
+          prevSB,
           balanceUpdatedAt,
         );
 
