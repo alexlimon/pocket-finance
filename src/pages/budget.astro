@@ -1214,12 +1214,8 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
   });
 });
 
-// Save computed checking_end to DB on page load so next month can use it as checking_before.
-// Only run for the current month — past months use stale bill data (no auto-check) and would
-// overwrite the correct end balance with a wrong value, corrupting the next month's opening balance.
+// Save computed checking_end to DB on page load so next month can use it as checking_before
 (function() {
-  const currentMonthStr = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
-  if (MONTH !== currentMonthStr) return;
   const checkEndEl = document.getElementById('checking-end-val');
   if (checkEndEl) {
     const checkEnd = parseFloat(checkEndEl.textContent!.replace(/[$,]/g,'') ?? '0');
