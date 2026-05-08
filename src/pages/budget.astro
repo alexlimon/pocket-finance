@@ -169,8 +169,10 @@ const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
 const pacingDaysElapsed = isNow
   ? Math.max(1, Math.min(Math.round((todayMid.getTime() - cycleStart.getTime()) / 86400000) + 1, pacingTotalDays))
   : pacingTotalDays;
-const pacingDailyRate = ccSpendBudget / pacingTotalDays;
-const pacingExpected  = pacingDailyRate * pacingDaysElapsed;
+const pacingDaysRemaining = Math.max(1, pacingTotalDays - pacingDaysElapsed);
+const pacingDailyRate = Math.max(0, ccSpendBudget - ccUsed) / pacingDaysRemaining;
+const pacingBaseRate  = ccSpendBudget / pacingTotalDays;
+const pacingExpected  = pacingBaseRate * pacingDaysElapsed;
 const pacingVariance  = ccUsed - pacingExpected; // positive = over pace
 ---
 
@@ -693,10 +695,12 @@ function recomputeCC() {
   // Pacing row
   const pacingRow = document.getElementById('cc-pacing-row') as HTMLElement | null;
   if (pacingRow) {
-    const totalDays   = parseInt(pacingRow.dataset.pacingTotalDays ?? '30');
-    const daysElapsed = parseInt(pacingRow.dataset.pacingDaysElapsed ?? '1');
-    const dailyRate   = budget / totalDays;
-    const expected    = dailyRate * daysElapsed;
+    const totalDays    = parseInt(pacingRow.dataset.pacingTotalDays ?? '30');
+    const daysElapsed  = parseInt(pacingRow.dataset.pacingDaysElapsed ?? '1');
+    const daysRemaining = Math.max(1, totalDays - daysElapsed);
+    const dailyRate    = Math.max(0, budget - total) / daysRemaining;
+    const baseRate     = budget / totalDays;
+    const expected     = baseRate * daysElapsed;
     const variance    = total - expected;
     const dailyEl = document.getElementById('cc-daily-rate');
     if (dailyEl) dailyEl.textContent = usd(dailyRate);
