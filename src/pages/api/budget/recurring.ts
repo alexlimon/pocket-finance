@@ -27,23 +27,32 @@ export async function POST(context: APIContext): Promise<Response> {
   let body: {
     name?: string; amount?: number; due_day?: number; is_cc?: boolean;
     entity_id?: string; category_id?: string; start_month?: string; end_month?: string;
+    vendor_alias?: string;
   };
   try { body = await context.request.json() as typeof body; }
   catch { return json({ error: 'Invalid JSON' }, 400); }
 
   const { name, amount = 0, due_day, is_cc = false, entity_id = 'household',
-          category_id, start_month, end_month } = body;
+          category_id, start_month, end_month, vendor_alias } = body;
   if (!name?.trim()) return json({ error: 'name required' }, 400);
 
   const id = `bill_custom_${Date.now()}`;
+  const alias = vendor_alias?.trim() || null;
   const client = getClient(env);
   try {
+    if (alias) {
+      // Clear any other bill that already owns this alias
+      await client.execute({
+        sql:  `UPDATE budget_config SET vendor_alias = NULL WHERE vendor_alias = ?`,
+        args: [alias],
+      });
+    }
     await client.execute({
       sql: `INSERT INTO budget_config
-              (id, name, monthly_target, due_day, is_recurring, is_cc_default, entity_id, category_id, start_month, end_month)
-            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+              (id, name, monthly_target, due_day, is_recurring, is_cc_default, entity_id, category_id, start_month, end_month, vendor_alias)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
       args: [id, name.trim(), amount, due_day ?? null, is_cc ? 1 : 0,
-             entity_id, category_id ?? null, start_month ?? null, end_month ?? null],
+             entity_id, category_id ?? null, start_month ?? null, end_month ?? null, alias],
     });
     return json({ ok: true, id }, 201);
   } finally { client.close(); }
