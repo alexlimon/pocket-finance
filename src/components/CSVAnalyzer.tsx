@@ -70,6 +70,7 @@ interface Subscription {
   months: string[];
   count: number;
   account_last4: string;
+  due_day: number | null;
 }
 
 
@@ -102,11 +103,14 @@ function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
     const monthlyAmounts = months.map(m => byMonth.get(m)!).sort((a, b) => a - b);
     const medianAmt = monthlyAmounts[Math.floor(monthlyAmounts.length / 2)]!;
     const vendor = rows.reduce((best, t) => t.description.length > best.length ? t.description : best, '');
+    const days = rows.map(t => parseInt(t.date.slice(8, 10))).sort((a, b) => a - b);
+    const due_day = days[Math.floor(days.length / 2)] ?? null;
     results.push({
       vendor,
       amount: Math.round(medianAmt * 100) / 100,
       total: Math.round(monthlyAmounts.reduce((s, a) => s + a, 0) * 100) / 100,
       months, count: rows.length, account_last4: rows[0]!.account_last4,
+      due_day,
     });
   }
   return results.sort((a, b) => b.months.length - a.months.length || b.amount - a.amount);
@@ -392,7 +396,6 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
     const alias = normalizeVendor(subVendor);
     setSaving(alias);
     try {
-      // If clearing (billId === ''), find the bill that currently owns this alias
       const targetId = billId || (aliasToId.get(alias) ?? '');
       if (!targetId) { setSaving(null); return; }
       const res = await fetch('/api/budget/bill-alias', {
@@ -408,6 +411,36 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
           return b;
         }));
       }
+    } finally { setSaving(null); }
+  }
+
+  async function handleCreate(sub: Subscription) {
+    const alias = normalizeVendor(sub.vendor);
+    setSaving(alias);
+    try {
+      // Derive a clean display name: title-case the normalized vendor string
+      const name = alias.split(' ')
+        .map(w => w.charAt(0) + w.slice(1).toLowerCase())
+        .join(' ');
+      const res = await fetch('/api/budget/recurring', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          amount:       sub.amount,
+          due_day:      sub.due_day,
+          is_cc:        true,
+          entity_id:    'household',
+          start_month:  sub.months[0],
+          vendor_alias: alias,
+        }),
+      });
+      if (!res.ok) return;
+      const { id } = await res.json() as { id: string };
+      setCcBills(prev => [
+        ...prev.map(b => b.vendor_alias === alias ? { ...b, vendor_alias: null } : b),
+        { id, name, vendor_alias: alias },
+      ]);
     } finally { setSaving(null); }
   }
 
@@ -451,13 +484,17 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
                     <select
                       value={mappedId}
                       disabled={isSaving}
-                      onChange={e => handleMap(s.vendor, e.target.value)}
+                      onChange={e => {
+                        if (e.target.value === '__create__') handleCreate(s);
+                        else handleMap(s.vendor, e.target.value);
+                      }}
                       className="rounded border border-stone-200 bg-white px-2 py-1 text-xs text-stone-600 disabled:opacity-50"
                     >
                       <option value="">— unmap —</option>
                       {ccBills.map(b => (
                         <option key={b.id} value={b.id}>{b.name}</option>
                       ))}
+                      <option value="__create__">+ Create new bill</option>
                     </select>
                   </td>
                 </tr>
