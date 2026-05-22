@@ -522,6 +522,11 @@ const pacingVariance  = ccUsed - pacingExpected; // positive = over pace
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Recurring Subscriptions</h2>
     <div class="flex items-center gap-3 text-xs">
+      <button id="cc-reconcile-btn"
+        class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
+        data-month={next}
+        data-mode="match"
+      >Reconcile</button>
       <button id="recurring-mode-toggle"
         class="flex items-center gap-1.5 rounded-full border border-surface-border px-2.5 py-1 text-xs hover:bg-surface-hover transition-colors"
         title="Toggle between estimated and actual recurring amounts"
@@ -554,6 +559,7 @@ const pacingVariance  = ccUsed - pacingExpected; // positive = over pace
             {b.is_auto && <span class="text-xs text-stone-400">*</span>}
           </div>
           <div class="flex items-center gap-1 flex-shrink-0">
+            <span class="match-hint hidden text-xs text-emerald-600 tabular-nums" data-bill-match={b.id}></span>
             <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
               data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
             <button class="cc-sub-skip opacity-0 group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
@@ -1293,5 +1299,67 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
     if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     window.location.href = dx < 0 ? `/budget?month=${NEXT}` : `/budget?month=${PREV}`;
   }, { passive: true });
+})();
+
+// ── CC Reconcile ──────────────────────────────────────────────────────────────
+(function () {
+  const btn = document.getElementById('cc-reconcile-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const paymentMonth = btn.dataset.month!;
+
+  btn.addEventListener('click', async () => {
+    if (btn.dataset.mode === 'apply') {
+      // Phase 2: apply all previewed matches
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
+      const hints = document.querySelectorAll<HTMLElement>('.match-hint[data-amount]');
+      const posts: Promise<unknown>[] = [];
+      hints.forEach(hint => {
+        const billId = hint.dataset.billMatch!;
+        const amount = parseFloat(hint.dataset.amount!);
+        if (isNaN(amount)) return;
+        posts.push(
+          fetch('/api/budget/bill-payment', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ month: paymentMonth, bill_id: billId, amount, is_paid: true, is_cc: true }),
+          })
+        );
+      });
+      await Promise.all(posts).catch(() => {});
+      location.reload();
+      return;
+    }
+
+    // Phase 1: fetch and preview matches
+    btn.disabled = true;
+    btn.textContent = 'Matching…';
+    try {
+      const res = await fetch(`/api/budget/cc-sub-matches?month=${paymentMonth}`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('fetch failed');
+      const { matches } = await res.json() as { matches: Array<{ bill_id: string; matched: { date: string; amount: number } | null }> };
+      let hitCount = 0;
+      for (const m of matches) {
+        const hint = document.querySelector<HTMLElement>(`[data-bill-match="${m.bill_id}"]`);
+        if (!hint || !m.matched) continue;
+        hint.textContent = `→ $${m.matched.amount.toFixed(2)} ${m.matched.date.slice(5)}`;
+        hint.dataset.amount = String(m.matched.amount);
+        hint.classList.remove('hidden');
+        hitCount++;
+      }
+      if (hitCount === 0) {
+        btn.textContent = 'No matches';
+        btn.disabled = false;
+        return;
+      }
+      btn.textContent = `Apply ${hitCount} match${hitCount > 1 ? 'es' : ''}`;
+      btn.dataset.mode = 'apply';
+      btn.disabled = false;
+    } catch {
+      btn.textContent = 'Reconcile';
+      btn.disabled = false;
+    }
+  });
 })();
 </script>

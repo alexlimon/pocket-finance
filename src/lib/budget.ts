@@ -115,6 +115,22 @@ export function currentMonth(): string {
  *  dueDay <= billingEndDay  →  charge lands in this billing cycle  →  pay next month
  *  dueDay >  billingEndDay  →  charge spills into next billing cycle →  pay month after
  */
+/**
+ * Returns the inclusive date range of the CC billing cycle that ends on `billingEndDay`
+ * of `billingMonth`. Used to find CSV transactions that map to a given payment month.
+ *
+ * E.g. billingMonth='2026-05', billingEndDay=24 → { start:'2026-04-25', end:'2026-05-24' }
+ * Caller should pass prevMonth(paymentMonth) as billingMonth.
+ */
+export function statementWindow(billingMonth: string, billingEndDay: number): { start: string; end: string } {
+  const [y, m] = billingMonth.split('-').map(Number);
+  const end  = new Date(Date.UTC(y, m - 1, billingEndDay));
+  const prev = new Date(Date.UTC(y, m - 2, billingEndDay));
+  prev.setUTCDate(prev.getUTCDate() + 1);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  return { start: fmt(prev), end: fmt(end) };
+}
+
 export function ccSubPaymentMonth(
   dueDay: number | null,
   billingEndDay: number,
