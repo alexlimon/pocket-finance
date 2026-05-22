@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { normalizeVendor } from '../lib/vendor-match';
 import MortgageCalculator from './MortgageCalculator';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -71,14 +72,6 @@ interface Subscription {
   account_last4: string;
 }
 
-function normalizeVendor(desc: string): string {
-  return desc.toUpperCase().trim()
-    .replace(/\*[A-Z0-9]+$/, '')
-    .replace(/\s+#?\d{4,}$/, '')
-    .replace(/\s+[A-Z]{2}$/, '')
-    .replace(/\s+[A-Z0-9]{8,}$/, '')  // strip Zelle/ACH reference IDs (e.g. JPM99CBRFI5B)
-    .trim();
-}
 
 function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
   const purchases = txns.filter(t => isPurchase(t) && !normalizeVendor(t.description).startsWith('AMAZON'));
@@ -374,12 +367,54 @@ function UploadPanel({
 
 // ── Panel: Subscriptions ──────────────────────────────────────────────────────
 
+interface CCBillAlias { id: string; name: string; vendor_alias: string | null; }
+
 function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
   const subs = useMemo(() => findSubscriptions(txns), [txns]);
+  const [ccBills, setCcBills] = useState<CCBillAlias[]>([]);
+  const [saving,  setSaving]  = useState<string | null>(null); // normalized alias being saved
+
+  useEffect(() => {
+    fetch('/api/budget/bill-alias')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => setCcBills(data as CCBillAlias[]))
+      .catch(() => {});
+  }, []);
+
+  // normalized alias → bill_id for already-mapped bills
+  const aliasToId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const b of ccBills) { if (b.vendor_alias) m.set(b.vendor_alias, b.id); }
+    return m;
+  }, [ccBills]);
+
+  async function handleMap(subVendor: string, billId: string) {
+    const alias = normalizeVendor(subVendor);
+    setSaving(alias);
+    try {
+      // If clearing (billId === ''), find the bill that currently owns this alias
+      const targetId = billId || (aliasToId.get(alias) ?? '');
+      if (!targetId) { setSaving(null); return; }
+      const res = await fetch('/api/budget/bill-alias', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ bill_id: targetId, vendor_alias: billId ? alias : null }),
+      });
+      if (res.ok) {
+        setCcBills(prev => prev.map(b => {
+          if (b.vendor_alias === alias && b.id !== billId) return { ...b, vendor_alias: null };
+          if (b.id === billId) return { ...b, vendor_alias: alias };
+          if (b.id === targetId && !billId) return { ...b, vendor_alias: null };
+          return b;
+        }));
+      }
+    } finally { setSaving(null); }
+  }
+
   if (!subs.length) return <EmptyState message="No recurring charges detected yet — upload at least 2 months of data." />;
   return (
     <div className="space-y-3">
-      <p className="text-sm text-stone-500">Same vendor + same amount in 2+ consecutive months. Sorted by monthly cost.</p>
+      <p className="text-sm text-stone-500">Same vendor + same amount in 2+ consecutive months. Select a CC bill to map a vendor for Reconcile.</p>
       <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
         <table className="w-full text-sm">
           <thead>
@@ -387,30 +422,47 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
               <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
               <th className="px-4 py-2.5 text-right font-medium">Amount</th>
               <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Months seen</th>
-              <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Actual total</th>
               <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Annual est.</th>
               <th className="px-4 py-2.5 text-left font-medium">Acct</th>
+              <th className="px-4 py-2.5 text-left font-medium">CC Bill</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
-            {subs.map((s, i) => (
-              <tr key={i} className="hover:bg-stone-50">
-                <td className="max-w-[220px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>{s.vendor}</td>
-                <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">{fmt(s.amount)}</td>
-                <td className="hidden px-4 py-2.5 text-center sm:table-cell">
-                  <div className="flex flex-wrap justify-center gap-1">
-                    {s.months.map(m => (
-                      <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{monthLabel(m)}</span>
-                    ))}
-                  </div>
-                </td>
-                <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-600 sm:table-cell">{fmt(s.total)}</td>
-                <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.amount * 12)}</td>
-                <td className="px-4 py-2.5">
-                  <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{s.account_last4}</span>
-                </td>
-              </tr>
-            ))}
+            {subs.map((s, i) => {
+              const alias    = normalizeVendor(s.vendor);
+              const mappedId = aliasToId.get(alias) ?? '';
+              const isSaving = saving === alias;
+              return (
+                <tr key={i} className="hover:bg-stone-50">
+                  <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>{s.vendor}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">{fmt(s.amount)}</td>
+                  <td className="hidden px-4 py-2.5 text-center sm:table-cell">
+                    <div className="flex flex-wrap justify-center gap-1">
+                      {s.months.map(m => (
+                        <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{monthLabel(m)}</span>
+                      ))}
+                    </div>
+                  </td>
+                  <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.amount * 12)}</td>
+                  <td className="px-4 py-2.5">
+                    <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{s.account_last4}</span>
+                  </td>
+                  <td className="px-4 py-2.5">
+                    <select
+                      value={mappedId}
+                      disabled={isSaving}
+                      onChange={e => handleMap(s.vendor, e.target.value)}
+                      className="rounded border border-stone-200 bg-white px-2 py-1 text-xs text-stone-600 disabled:opacity-50"
+                    >
+                      <option value="">— unmap —</option>
+                      {ccBills.map(b => (
+                        <option key={b.id} value={b.id}>{b.name}</option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
