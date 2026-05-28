@@ -191,8 +191,10 @@ const ccPaceBaseline    = computeCCPaceBaseline(ccPaceMonthTotals, month);
 const budgetDeltaPct    = ccBudgetBaseline.nMonths >= 3 && ccBudgetBaseline.avg > 0
   ? ((ccSpendBudget - ccBudgetBaseline.avg) / ccBudgetBaseline.avg) * 100
   : 0;
+// Actual pace = what you've spent ÷ days elapsed (not the forward projection)
+const actualPaceRate    = pacingDaysElapsed > 0 ? ccUsed / pacingDaysElapsed : 0;
 const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDailyRate > 0
-  ? ((pacingDailyRate - ccPaceBaseline.avgDailyRate) / ccPaceBaseline.avgDailyRate) * 100
+  ? ((actualPaceRate - ccPaceBaseline.avgDailyRate) / ccPaceBaseline.avgDailyRate) * 100
   : 0;
 ---
 
@@ -534,8 +536,9 @@ const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDaily
   {ccPaceBaseline.nMonths >= 2 && (
     <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400"
       id="cc-pace-baseline-row"
-      data-avg-daily={ccPaceBaseline.avgDailyRate}>
-      <span>6-mo avg pace: <span class="font-medium text-stone-600">{fmt(ccPaceBaseline.avgDailyRate)}</span>/day</span>
+      data-avg-daily={ccPaceBaseline.avgDailyRate}
+      data-days-elapsed={pacingDaysElapsed}>
+      <span>6-mo avg pace: <span class="font-medium text-stone-600">{fmt(ccPaceBaseline.avgDailyRate)}</span>/day · yours: <span id="cc-actual-pace" class="font-medium text-stone-600">{fmt(actualPaceRate)}</span>/day</span>
       <span class="text-stone-300">·</span>
       <span id="cc-pace-delta" class={`font-medium ${paceDeltaPct > 10 ? 'text-brand-red' : paceDeltaPct < -10 ? 'text-brand-green' : 'text-stone-500'}`}>
         {Math.abs(paceDeltaPct) < 5 ? 'at avg pace' : paceDeltaPct > 0 ? `${Math.round(paceDeltaPct)}% above 6-mo avg` : `${Math.round(-paceDeltaPct)}% below 6-mo avg`}
@@ -758,13 +761,17 @@ function recomputeCC() {
       varEl3.className = varEl3.className.replace(/text-brand-\w+|text-stone-\d+/g,'') + (variance > 50 ? 'text-brand-red' : variance < -50 ? 'text-brand-green' : 'text-stone-500');
     }
 
-    // Pace baseline delta
+    // Pace baseline delta — actual pace = spent ÷ days elapsed
     const paceBaseRow = document.getElementById('cc-pace-baseline-row') as HTMLElement | null;
     if (paceBaseRow) {
-      const avgDaily = parseFloat(paceBaseRow.dataset.avgDaily ?? '0');
-      const deltaEl  = document.getElementById('cc-pace-delta');
+      const avgDaily   = parseFloat(paceBaseRow.dataset.avgDaily ?? '0');
+      const dElapsed   = parseInt(paceBaseRow.dataset.daysElapsed ?? '1') || 1;
+      const actualRate = total / dElapsed;
+      const deltaEl    = document.getElementById('cc-pace-delta');
+      const actualEl   = document.getElementById('cc-actual-pace');
+      if (actualEl) actualEl.textContent = usd(actualRate);
       if (avgDaily > 0 && deltaEl) {
-        const pct = (dailyRate - avgDaily) / avgDaily * 100;
+        const pct = (actualRate - avgDaily) / avgDaily * 100;
         deltaEl.textContent = Math.abs(pct) < 5 ? 'at avg pace' : pct > 0 ? `${Math.round(pct)}% above 6-mo avg` : `${Math.round(-pct)}% below 6-mo avg`;
         deltaEl.className   = deltaEl.className.replace(/text-brand-\w+|text-stone-\d+/g,'') + (pct > 10 ? ' text-brand-red' : pct < -10 ? ' text-brand-green' : ' text-stone-500');
       }
