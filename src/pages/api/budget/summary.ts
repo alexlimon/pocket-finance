@@ -41,17 +41,25 @@ export async function POST(context: APIContext): Promise<Response> {
       args: [...args, month],
     });
 
-    // When checking_after is saved, propagate it as the next month's checking_before
-    if ('checking_after' in body) {
+    // Propagate end balances to next month's start balances
+    if ('checking_after' in body || 'savings_after' in body) {
       const next = nextMonth(month);
       await client.execute({
         sql:  `INSERT INTO monthly_summary (month) VALUES (?) ON CONFLICT(month) DO NOTHING`,
         args: [next],
       });
-      await client.execute({
-        sql:  `UPDATE monthly_summary SET checking_before = ? WHERE month = ?`,
-        args: [Number(body.checking_after), next],
-      });
+      if ('checking_after' in body) {
+        await client.execute({
+          sql:  `UPDATE monthly_summary SET checking_before = ? WHERE month = ?`,
+          args: [Number(body.checking_after), next],
+        });
+      }
+      if ('savings_after' in body) {
+        await client.execute({
+          sql:  `UPDATE monthly_summary SET savings_before = ? WHERE month = ?`,
+          args: [Number(body.savings_after), next],
+        });
+      }
     }
 
     return json({ ok: true });
