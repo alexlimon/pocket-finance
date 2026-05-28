@@ -259,9 +259,9 @@ document.querySelectorAll<HTMLButtonElement>('.propagate-btn').forEach(btn => {
     const startInput = row.querySelector<HTMLInputElement>('.start-month-input');
     const endInput   = row.querySelector<HTMLInputElement>('.end-month-input');
     const start = startInput?.value?.slice(0, 7);
-    const end   = endInput?.value?.slice(0, 7);
-    if (!start || !end) {
-      alert('Set a Start Date and End Date first, then click Propagate.');
+    const end   = endInput?.value?.slice(0, 7) || new Date().toISOString().slice(0, 7);
+    if (!start) {
+      alert('Set a Start Date first, then click Propagate.');
       return;
     }
     if (start > end) { alert('Start date must be before end date.'); return; }
