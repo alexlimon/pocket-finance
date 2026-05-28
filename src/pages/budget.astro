@@ -9,7 +9,7 @@ import {
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
   type ResolvedBill, type BigPurchase,
 } from '../lib/budget-calc';
-import { computeCCBudgetBaseline, computeCCPaceBaseline } from '../lib/insights';
+import { computeCCBudgetBaseline, computeCCPaceBaseline, projectCCSpend } from '../lib/insights';
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
@@ -87,7 +87,7 @@ try {
     // CC budget baseline — last 12 months with non-zero cc_budget
     client.execute({ sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [month] }),
     // CC pace baseline — last 6 months of variable spend totals
-    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 6`, args: [month] }),
+    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [month] }),
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -196,6 +196,16 @@ const actualPaceRate    = pacingDaysElapsed > 0 ? ccUsed / pacingDaysElapsed : 0
 const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDailyRate > 0
   ? ((actualPaceRate - ccPaceBaseline.avgDailyRate) / ccPaceBaseline.avgDailyRate) * 100
   : 0;
+
+// ── CC Spend Projection ───────────────────────────────────────────────────────
+const bigPurchasesTotal = bigPurchases.reduce((s, c) => s + c.amount, 0);
+const projection = projectCCSpend({
+  ccUsed,
+  bigPurchasesTotal,
+  daysElapsed: pacingDaysElapsed,
+  totalDays:   pacingTotalDays,
+  history:     ccPaceMonthTotals,
+});
 ---
 
 <Layout title={label}>
@@ -545,6 +555,32 @@ const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDaily
       </span>
     </div>
   )}
+  {projection.enabled && (isNow || isFuture) && (
+    <div class="mt-2 rounded-lg border border-surface-border bg-surface px-3 py-2.5"
+      id="cc-projection-row"
+      data-history-avg={projection.historicalAvg}
+      data-history-std={projection.historicalStd}
+      data-big-total={bigPurchasesTotal}
+      data-days-elapsed={pacingDaysElapsed}
+      data-total-days={pacingTotalDays}
+    >
+      <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+        <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+          <span class="text-xs text-stone-500">Projected this cycle:</span>
+          <span class="tabular-nums font-semibold text-stone-800" id="cc-projected-val">{fmt(projection.projected)}</span>
+          {projection.historicalStd > 0.5 && (
+            <span class="text-xs text-stone-400" id="cc-projected-band">({fmt(projection.bandLow)}–{fmt(projection.bandHigh)})</span>
+          )}
+        </div>
+        <button id="cc-use-projection-btn"
+          class="rounded-full bg-lime-50 border border-lime-300 px-3 py-1 text-xs font-medium text-brand-green hover:bg-lime-100 transition-colors"
+          data-projected={Math.round(projection.projected)}
+          data-next-month={next}
+        >Use as budget</button>
+      </div>
+      <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
+    </div>
+  )}
   <p class="mt-1 text-xs text-stone-400">Variable spend + big purchases count against budget. Recurring subscriptions are separate.</p>
 </div>
 
@@ -777,7 +813,57 @@ function recomputeCC() {
       }
     }
   }
+
+  // Live-update CC spend projection
+  const projRow = document.getElementById('cc-projection-row') as HTMLElement | null;
+  if (projRow) {
+    const histAvg    = parseFloat(projRow.dataset.historyAvg ?? '0');
+    const histStd    = parseFloat(projRow.dataset.historyStd ?? '0');
+    const bigTotal   = parseFloat(projRow.dataset.bigTotal ?? '0');
+    const daysEl     = parseInt(projRow.dataset.daysElapsed ?? '0');
+    const totalDaysP = parseInt(projRow.dataset.totalDays ?? '30');
+
+    const ambientUsed = Math.max(0, total - bigTotal);
+    const ambientRate = daysEl > 0 ? ambientUsed / daysEl : 0;
+    const linearProj  = ambientRate * totalDaysP + bigTotal;
+    const conf        = Math.min(Math.max(daysEl / Math.max(1, totalDaysP), 0), 1);
+    const projected   = (1 - conf) * histAvg + conf * linearProj;
+    const bandHalf    = 0.674 * histStd;
+
+    const projValEl  = document.getElementById('cc-projected-val');
+    const projBandEl = document.getElementById('cc-projected-band');
+    if (projValEl)  projValEl.textContent  = usd(Math.round(projected));
+    if (projBandEl && histStd > 0.5) {
+      projBandEl.textContent = `(${usd(Math.round(projected - bandHalf))}–${usd(Math.round(projected + bandHalf))})`;
+    }
+    const useBtn = document.getElementById('cc-use-projection-btn') as HTMLButtonElement | null;
+    if (useBtn) useBtn.dataset.projected = String(Math.round(projected));
+  }
 }
+
+// ── CC Projection "Use as budget" ────────────────────────────────────────────
+document.getElementById('cc-use-projection-btn')?.addEventListener('click', async () => {
+  const btn       = document.getElementById('cc-use-projection-btn') as HTMLButtonElement;
+  const projected = parseFloat(btn.dataset.projected ?? '0');
+  const nextMonth = btn.dataset.nextMonth!;
+  if (!projected || !nextMonth) return;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await api('/api/budget/summary', 'POST', { month: nextMonth, cc_budget: projected });
+    const budgetEl = document.getElementById('cc-budget-display') as HTMLElement | null;
+    if (budgetEl) {
+      budgetEl.textContent = usd(projected);
+      budgetEl.dataset.recurring = budgetEl.dataset.recurring ?? '0';
+    }
+    recomputeCC();
+    btn.textContent = '✓ Applied';
+    setTimeout(() => { btn.textContent = 'Use as budget'; btn.disabled = false; }, 2000);
+  } catch {
+    btn.textContent = 'Use as budget';
+    btn.disabled = false;
+  }
+});
 
 // ── Estimated / Actual recurring toggle ──────────────────────────────────────
 // Swaps the recurring component of CC Payment and cascades to NET + Checking End.
