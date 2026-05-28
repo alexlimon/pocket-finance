@@ -337,6 +337,53 @@ export function projectScenario(params: {
   return { projections, totalDelta, eoyBaseNet, eoyScenarioNet, needsReserves, reservesDraw, verdict };
 }
 
+// ── CC Spend Projection ──────────────────────────────────────────────────────
+
+export function projectCCSpend(params: {
+  ccUsed:            number;
+  bigPurchasesTotal: number;
+  daysElapsed:       number;
+  totalDays:         number;
+  history:           { month: string; total: number }[];
+}): {
+  projected:     number;
+  bandLow:       number;
+  bandHigh:      number;
+  ambientRate:   number;
+  confidence:    number;
+  historicalAvg: number;
+  historicalStd: number;
+  historyN:      number;
+  enabled:       boolean;
+} {
+  const { ccUsed, bigPurchasesTotal, daysElapsed, totalDays, history } = params;
+
+  const eligible = history.filter(h => Number(h.total) > 0);
+  const historyN = eligible.length;
+
+  if (historyN < 3) {
+    return { projected: 0, bandLow: 0, bandHigh: 0, ambientRate: 0, confidence: 0, historicalAvg: 0, historicalStd: 0, historyN, enabled: false };
+  }
+
+  const totals       = eligible.map(h => Number(h.total));
+  const historicalAvg = totals.reduce((s, v) => s + v, 0) / historyN;
+  const variance     = totals.reduce((s, v) => s + Math.pow(v - historicalAvg, 2), 0) / historyN;
+  const historicalStd = Math.sqrt(variance);
+
+  const ambientUsed      = Math.max(0, ccUsed - bigPurchasesTotal);
+  const ambientRate      = daysElapsed > 0 ? ambientUsed / daysElapsed : 0;
+  const linearProjection = ambientRate * totalDays + bigPurchasesTotal;
+
+  const confidence = Math.min(Math.max(daysElapsed / Math.max(1, totalDays), 0), 1);
+  const projected  = (1 - confidence) * historicalAvg + confidence * linearProjection;
+
+  const bandHalf = 0.674 * historicalStd;
+  const bandLow  = projected - bandHalf;
+  const bandHigh = projected + bandHalf;
+
+  return { projected, bandLow, bandHigh, ambientRate, confidence, historicalAvg, historicalStd, historyN, enabled: true };
+}
+
 // ── CC Baseline Comparisons ──────────────────────────────────────────────────
 
 export function computeCCBudgetBaseline(
