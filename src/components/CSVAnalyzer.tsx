@@ -431,7 +431,7 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
           due_day:      sub.due_day,
           is_cc:        true,
           entity_id:    'household',
-          start_month:  sub.months[0],
+          start_month:  new Date().toISOString().slice(0, 7),
           vendor_alias: alias,
         }),
       });
