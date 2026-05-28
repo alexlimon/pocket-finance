@@ -167,9 +167,9 @@ const cycleEnd   = new Date(pacYr, pacMo - 1, defaultBillingEndDay);
 const pacingTotalDays = Math.round((cycleEnd.getTime() - cycleStart.getTime()) / 86400000) + 1;
 const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
 const isFuture = month > currentMonth();
-const pacingDaysElapsed = isNow
-  ? Math.max(1, Math.min(Math.round((todayMid.getTime() - cycleStart.getTime()) / 86400000) + 1, pacingTotalDays))
-  : isFuture ? 0 : pacingTotalDays;
+const pacingDaysElapsed = (isNow || isFuture)
+  ? Math.max(0, Math.min(Math.round((todayMid.getTime() - cycleStart.getTime()) / 86400000) + 1, pacingTotalDays))
+  : pacingTotalDays;
 const pacingDaysRemaining = Math.max(1, pacingTotalDays - pacingDaysElapsed);
 const pacingDailyRate = Math.max(0, ccSpendBudget - ccUsed) / pacingDaysRemaining;
 const pacingBaseRate  = ccSpendBudget / pacingTotalDays;
