@@ -337,6 +337,36 @@ export function projectScenario(params: {
   return { projections, totalDelta, eoyBaseNet, eoyScenarioNet, needsReserves, reservesDraw, verdict };
 }
 
+// ── CC Baseline Comparisons ──────────────────────────────────────────────────
+
+export function computeCCBudgetBaseline(
+  summaries: { month: string; cc_budget: number }[],
+  currentMonth: string,
+  windowMonths = 12,
+): { avg: number; nMonths: number } {
+  const eligible = summaries
+    .filter(s => s.month < currentMonth && Number(s.cc_budget) > 0)
+    .sort((a, b) => b.month.localeCompare(a.month))
+    .slice(0, windowMonths);
+  if (eligible.length < 3) return { avg: 0, nMonths: 0 };
+  const avg = eligible.reduce((s, r) => s + Number(r.cc_budget), 0) / eligible.length;
+  return { avg, nMonths: eligible.length };
+}
+
+export function computeCCPaceBaseline(
+  monthTotals: { month: string; total: number }[],
+  currentMonth: string,
+  windowMonths = 6,
+): { avgMonthlyTotal: number; avgDailyRate: number; nMonths: number } {
+  const eligible = monthTotals
+    .filter(s => s.month < currentMonth && Number(s.total) > 0)
+    .sort((a, b) => b.month.localeCompare(a.month))
+    .slice(0, windowMonths);
+  if (eligible.length < 2) return { avgMonthlyTotal: 0, avgDailyRate: 0, nMonths: 0 };
+  const avgMonthlyTotal = eligible.reduce((s, r) => s + Number(r.total), 0) / eligible.length;
+  return { avgMonthlyTotal, avgDailyRate: avgMonthlyTotal / 30, nMonths: eligible.length };
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 export function fmtCurrency(n: number, opts?: { compact?: boolean; sign?: boolean }): string {
