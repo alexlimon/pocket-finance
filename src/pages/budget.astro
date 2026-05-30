@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
-import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
+import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
 import { syncCCSpend } from '../lib/plaid-sync';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
@@ -164,7 +164,7 @@ const balances = computeBalances(summary, cashFlow.netAmount);
 // Destructure for template use
 const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
 const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
-        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
+        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccTotalCharged, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
@@ -199,8 +199,12 @@ const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDaily
 
 // ── CC Spend Projection ───────────────────────────────────────────────────────
 const bigPurchasesTotal = bigPurchases.reduce((s, c) => s + c.amount, 0);
+// Big purchases as % of budget (capped so ambient + big segments don't overflow)
+const ccBigPct = ccSpendBudget > 0
+  ? Math.min((ccBig / ccSpendBudget) * 100, Math.max(0, 100 - ccUsedPct))
+  : 0;
 const projection = projectCCSpend({
-  ccUsed,
+  ccUsed:            ccVariableOnly,  // ambient-only for projection rate
   bigPurchasesTotal,
   daysElapsed: pacingDaysElapsed,
   totalDays:   pacingTotalDays,
@@ -512,12 +516,14 @@ const projection = projectCCSpend({
     <div class="flex gap-4 text-right text-sm">
       <div><p class="text-xs text-stone-400">Variable</p><p class="tabular-nums text-stone-600" id="cc-variable-val2">{fmt(ccVariableOnly)}</p></div>
       <div><p class="text-xs text-stone-400">Big Purchases</p><p class="tabular-nums text-stone-500" id="cc-big-val">{fmt(ccBig)}</p></div>
-      <div><p class="text-xs text-stone-400">Total Charged</p><p class="tabular-nums font-medium text-stone-700" id="cc-total-val">{fmt(ccUsed)}</p></div>
+      <div><p class="text-xs text-stone-400">Total Charged</p><p class="tabular-nums font-medium text-stone-700" id="cc-total-val">{fmt(ccTotalCharged)}</p></div>
     </div>
   </div>
-  <div class="h-2 rounded-full bg-surface overflow-hidden">
-    <div id="cc-bar" class={`h-full rounded-full transition-all ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
+  <div class="h-2 rounded-full bg-surface overflow-hidden flex gap-0">
+    <div id="cc-bar" class={`h-full transition-all ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
       style={`width:${ccUsedPct.toFixed(1)}%`}></div>
+    <div id="cc-bar-big" class="h-full bg-stone-300 transition-all"
+      style={`width:${ccBigPct.toFixed(1)}%`} title="Big purchases (not counted against budget)"></div>
   </div>
   <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400"
     id="cc-pacing-row"
@@ -581,7 +587,7 @@ const projection = projectCCSpend({
       <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
     </div>
   )}
-  <p class="mt-1 text-xs text-stone-400">Variable spend + big purchases count against budget. Recurring subscriptions are separate.</p>
+  <p class="mt-1 text-xs text-stone-400">Variable spend counts against budget. Big purchases are tracked separately (shown in gray). Recurring subscriptions are separate.</p>
 </div>
 
 <!-- CC Recurring Subscriptions -->
@@ -658,7 +664,7 @@ const projection = projectCCSpend({
 <div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Big Purchases</h2>
-    <span class="text-xs text-stone-400">Count against CC budget</span>
+    <span class="text-xs text-stone-400">Tracked separately · not counted against budget</span>
   </div>
 
   <div id="big-cc-charges" class="space-y-3 mb-4">
@@ -683,6 +689,14 @@ const projection = projectCCSpend({
                 <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id={c.id}>
                   {ccSettings.map(s=><option value={s.card} selected={c.card===s.card}>{s.display_name}</option>)}
                 </select>
+                <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium flex-shrink-0"
+                  data-id={c.id}
+                  style={`color:${bigPurchaseCategoryColor(c.category_id)}`}>
+                  <option value="">Category</option>
+                  {BIG_PURCHASE_CATEGORIES.map(cat => (
+                    <option value={cat.id} selected={c.category_id === cat.id} style={`color:${cat.color}`}>{cat.label}</option>
+                  ))}
+                </select>
                 <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id={c.id}>{c.description}</span>
                 <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id={c.id}>{fmt(c.amount)}</span>
                 <button class="cc-toggle-big opacity-0 group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id={c.id} data-big="1" title="Move to Variable">↑</button>
@@ -704,6 +718,15 @@ const projection = projectCCSpend({
       <label class="text-xs text-stone-400">Card</label>
       <select name="card" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none">
         {ccSettings.map(s=><option value={s.card}>{s.display_name}</option>)}
+      </select>
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400">Category</label>
+      <select name="category_id" class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none">
+        <option value="">—</option>
+        {BIG_PURCHASE_CATEGORIES.map(cat => (
+          <option value={cat.id}>{cat.label}</option>
+        ))}
       </select>
     </div>
     <div class="flex flex-col gap-1 flex-1 min-w-36">
@@ -744,7 +767,7 @@ async function api(url: string, method: string, body: object) {
 }
 
 // ── Recompute CC remaining from DOM ──────────────────────────────────────────
-// Formula: remaining = budget - (variable - recurring) - big purchases
+// Budget bar tracks ambient (variable) only. Big purchases shown separately in gray.
 function recomputeCC() {
   const budgetEl = document.getElementById('cc-budget-display') as HTMLElement;
   const budget    = parseFloat(budgetEl?.textContent?.replace(/[$,]/g,'') ?? '5000');
@@ -761,9 +784,11 @@ function recomputeCC() {
     bigCC += parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
   });
 
-  const total     = variableOnly + bigCC;
-  const remaining = budget - total;
-  const pct       = Math.min(total / budget * 100, 100);
+  // Ambient drives the bar and remaining; big purchases shown separately
+  const remaining = budget - variableOnly;
+  const pct       = Math.min(variableOnly / budget * 100, 100);
+  const bigPct    = Math.min(bigCC / budget * 100, Math.max(0, 100 - pct));
+  const total     = variableOnly + bigCC;  // for "Total Charged" display
 
   const remEl = document.getElementById('cc-remaining-val');
   if (remEl) {
@@ -774,19 +799,21 @@ function recomputeCC() {
   const varEl2 = document.getElementById('cc-variable-val2'); if (varEl2) varEl2.textContent = usd(variableOnly);
   const bigEl = document.getElementById('cc-big-val');       if (bigEl) bigEl.textContent = usd(bigCC);
   const totEl = document.getElementById('cc-total-val');     if (totEl) totEl.textContent = usd(total);
-  const bar   = document.getElementById('cc-bar') as HTMLElement;
+  const bar    = document.getElementById('cc-bar') as HTMLElement;
+  const barBig = document.getElementById('cc-bar-big') as HTMLElement;
   if (bar) { bar.style.width = pct.toFixed(1)+'%'; bar.className = bar.className.replace(/bg-brand-\w+/g,'')+(pct>=100?' bg-brand-red':pct>=80?' bg-brand-yellow':' bg-brand-green'); }
+  if (barBig) barBig.style.width = bigPct.toFixed(1)+'%';
 
-  // Pacing row
+  // Pacing row — measures ambient pace only
   const pacingRow = document.getElementById('cc-pacing-row') as HTMLElement | null;
   if (pacingRow) {
     const totalDays    = parseInt(pacingRow.dataset.pacingTotalDays ?? '30');
     const daysElapsed  = parseInt(pacingRow.dataset.pacingDaysElapsed ?? '1');
     const daysRemaining = Math.max(1, totalDays - daysElapsed);
-    const dailyRate    = Math.max(0, budget - total) / daysRemaining;
+    const dailyRate    = Math.max(0, budget - variableOnly) / daysRemaining;
     const baseRate     = budget / totalDays;
     const expected     = baseRate * daysElapsed;
-    const variance    = total - expected;
+    const variance    = variableOnly - expected;
     const dailyEl = document.getElementById('cc-daily-rate');
     if (dailyEl) dailyEl.textContent = usd(dailyRate);
     const expEl = document.getElementById('cc-pacing-expected');
@@ -797,12 +824,12 @@ function recomputeCC() {
       varEl3.className = varEl3.className.replace(/text-brand-\w+|text-stone-\d+/g,'') + (variance > 50 ? 'text-brand-red' : variance < -50 ? 'text-brand-green' : 'text-stone-500');
     }
 
-    // Pace baseline delta — actual pace = spent ÷ days elapsed
+    // Pace baseline delta — ambient pace only (variable, no big purchases)
     const paceBaseRow = document.getElementById('cc-pace-baseline-row') as HTMLElement | null;
     if (paceBaseRow) {
       const avgDaily   = parseFloat(paceBaseRow.dataset.avgDaily ?? '0');
       const dElapsed   = parseInt(paceBaseRow.dataset.daysElapsed ?? '1') || 1;
-      const actualRate = total / dElapsed;
+      const actualRate = variableOnly / dElapsed;
       const deltaEl    = document.getElementById('cc-pace-delta');
       const actualEl   = document.getElementById('cc-actual-pace');
       if (actualEl) actualEl.textContent = usd(actualRate);
@@ -819,13 +846,11 @@ function recomputeCC() {
   if (projRow) {
     const histAvg    = parseFloat(projRow.dataset.historyAvg ?? '0');
     const histStd    = parseFloat(projRow.dataset.historyStd ?? '0');
-    const bigTotal   = parseFloat(projRow.dataset.bigTotal ?? '0');
     const daysEl     = parseInt(projRow.dataset.daysElapsed ?? '0');
     const totalDaysP = parseInt(projRow.dataset.totalDays ?? '30');
 
-    const ambientUsed = Math.max(0, total - bigTotal);
-    const ambientRate = daysEl > 0 ? ambientUsed / daysEl : 0;
-    const linearProj  = ambientRate * totalDaysP + bigTotal;
+    const ambientRate = daysEl > 0 ? variableOnly / daysEl : 0;
+    const linearProj  = ambientRate * totalDaysP + bigCC;
     const conf        = Math.min(Math.max(daysEl / Math.max(1, totalDaysP), 0), 1);
     const projected   = (1 - conf) * histAvg + conf * linearProj;
     const bandHalf    = 0.674 * histStd;
@@ -1252,6 +1277,14 @@ document.querySelectorAll<HTMLSelectElement>('.cc-card-select').forEach(sel => {
   });
 });
 
+// ── CC category select (big purchases) ───────────────────────────────────────
+document.querySelectorAll<HTMLSelectElement>('.cc-category-select').forEach(sel => {
+  sel.addEventListener('change', async () => {
+    await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,category_id:sel.value||null}).catch(()=>{});
+    sel.style.color = sel.value ? (BIG_CAT_COLORS[sel.value]??'#a8a29e') : '#a8a29e';
+  });
+});
+
 // ── Toggle big purchase ───────────────────────────────────────────────────────
 document.querySelectorAll<HTMLButtonElement>('.cc-toggle-big').forEach(btn => {
   btn.addEventListener('click', async () => {
@@ -1302,15 +1335,25 @@ function payMonthFor(date: string, card: string): {pm:string; pmFmt:string} {
 }
 
 // ── Add big purchase ──────────────────────────────────────────────────────────
+const BIG_CAT_COLORS: Record<string,string> = {
+  travel:'#0ea5e9', home:'#84cc16', rental:'#8b5cf6',
+  shopping:'#f59e0b', auto:'#3b82f6', medical:'#f43f5e',
+};
+const BIG_CAT_LABELS: Record<string,string> = {
+  travel:'Travel', home:'Home', rental:'Rental',
+  shopping:'Shopping', auto:'Auto', medical:'Medical',
+};
+
 const addBigForm = document.getElementById('add-big-form') as HTMLFormElement;
 addBigForm?.addEventListener('submit', async e => {
   e.preventDefault();
   const data = new FormData(addBigForm);
   const date=String(data.get('date')??'').trim(), card=String(data.get('card')),
+        category_id=String(data.get('category_id')??'').trim()||null,
         desc=String(data.get('description')??'').trim(), amount=parseFloat(String(data.get('amount')));
   if (!date||!desc||isNaN(amount)) return;
   try {
-    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true}) as {id:string;payment_month:string|null};
+    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true,category_id}) as {id:string;payment_month:string|null};
     const pm = res.payment_month ?? 'unknown';
     const {pmFmt} = payMonthFor(date, card);
     const container = document.getElementById('big-cc-charges')!;
@@ -1331,19 +1374,29 @@ addBigForm?.addEventListener('submit', async e => {
       container.appendChild(groupEl);
     }
     const cardOptions = Object.entries(billingSettings).map(([c,s])=>`<option value="${c}"${c===card?' selected':''}>${(s as any).display_name}</option>`).join('');
+    const catColor = category_id ? (BIG_CAT_COLORS[category_id]??'#a8a29e') : '#a8a29e';
+    const catOptions = `<option value="">Category</option>` +
+      Object.entries(BIG_CAT_LABELS).map(([id,lbl])=>`<option value="${id}"${id===category_id?' selected':''} style="color:${BIG_CAT_COLORS[id]}">${lbl}</option>`).join('');
     const row = document.createElement('div');
     row.dataset.ccId = res.id;
     row.className = 'flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm';
     row.innerHTML = `
       <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">${date}</span>
       <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id="${res.id}">${cardOptions}</select>
+      <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium flex-shrink-0" data-id="${res.id}" style="color:${catColor}">${catOptions}</select>
       <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id="${res.id}">${desc}</span>
       <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id="${res.id}">${usd(amount)}</span>
+      <button class="cc-toggle-big opacity-0 group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id="${res.id}" data-big="1" title="Move to Variable">↑</button>
       <button class="delete-cc-charge opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
     `;
     groupEl.querySelector('.big-charges-body')!.appendChild(row);
     const tot = groupEl.querySelector('.big-group-total');
     if (tot) { const c=parseFloat(tot.textContent!.replace(/[$,]/g,''))||0; tot.textContent=usd(c+amount); }
+    row.querySelector<HTMLSelectElement>('.cc-category-select')?.addEventListener('change', async (ev) => {
+      const sel = ev.target as HTMLSelectElement;
+      await api('/api/budget/cc-charge','PATCH',{id:res.id,category_id:sel.value||null}).catch(()=>{});
+      sel.style.color = sel.value ? (BIG_CAT_COLORS[sel.value]??'#a8a29e') : '#a8a29e';
+    });
     row.querySelector('.delete-cc-charge')?.addEventListener('click', async () => {
       await fetch(`/api/budget/cc-charge?id=${res.id}`,{method:'DELETE'});
       row.remove();

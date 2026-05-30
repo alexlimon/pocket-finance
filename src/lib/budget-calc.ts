@@ -172,7 +172,8 @@ export function computeCCSpendingTracker(params: {
   ccVariableTotal:      number;
   ccVariableOnly:       number;
   ccBig:                number;
-  ccUsed:               number;
+  ccUsed:               number;   // ambient-only (variableOnly), drives the bar/pacing
+  ccTotalCharged:       number;   // variableOnly + big purchases, for display
   ccSpendBudget:        number;
   ccRemaining:          number;
   ccUsedPct:            number;
@@ -199,7 +200,8 @@ export function computeCCSpendingTracker(params: {
   const ccVariableTotal   = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
   const ccVariableOnly    = Math.max(0, ccVariableTotal - ccRecurringInVariable);
   const ccBig             = bigPurchases.reduce((s, c) => s + c.amount, 0);
-  const ccUsed            = ccVariableOnly + ccBig;
+  const ccUsed            = ccVariableOnly;           // ambient-only drives bar/pacing
+  const ccTotalCharged    = ccVariableOnly + ccBig;   // true total for display
   const ccRemaining       = ccSpendBudget - ccUsed;
   const ccUsedPct         = Math.min((ccUsed / ccSpendBudget) * 100, 100);
 
@@ -215,6 +217,7 @@ export function computeCCSpendingTracker(params: {
     ccVariableOnly,
     ccBig,
     ccUsed,
+    ccTotalCharged,
     ccSpendBudget,
     ccRemaining,
     ccUsedPct,
