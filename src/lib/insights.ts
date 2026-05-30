@@ -414,6 +414,71 @@ export function computeCCPaceBaseline(
   return { avgMonthlyTotal, avgDailyRate: avgMonthlyTotal / 30, nMonths: eligible.length };
 }
 
+// ── Big Purchase Amortization ────────────────────────────────────────────────
+
+export interface BigPurchaseAmortRow {
+  category_id:       string;   // null rows stored as 'other'
+  label:             string;
+  color:             string;
+  total:             number;
+  count:             number;
+  monthlyAmortized:  number;   // total / windowMonths
+}
+
+export interface BigPurchaseAmortResult {
+  byCategory:        BigPurchaseAmortRow[];
+  grandTotal:        number;
+  monthlyAmortized:  number;   // grandTotal / windowMonths
+  windowMonths:      number;
+  annualReserveTarget: number; // monthlyAmortized * 12
+}
+
+const CAT_META: Record<string, { label: string; color: string }> = {
+  travel:   { label: 'Travel',   color: '#0ea5e9' },
+  home:     { label: 'Home',     color: '#84cc16' },
+  rental:   { label: 'Rental',   color: '#8b5cf6' },
+  shopping: { label: 'Shopping', color: '#f59e0b' },
+  auto:     { label: 'Auto',     color: '#3b82f6' },
+  medical:  { label: 'Medical',  color: '#f43f5e' },
+  other:    { label: 'Other',    color: '#a8a29e' },
+};
+
+export function amortizeBigPurchases(
+  charges: { category_id: string | null; amount: number }[],
+  windowMonths: number,
+): BigPurchaseAmortResult {
+  const totals = new Map<string, { total: number; count: number }>();
+
+  for (const c of charges) {
+    const key = c.category_id ?? 'other';
+    const cur = totals.get(key) ?? { total: 0, count: 0 };
+    totals.set(key, { total: cur.total + c.amount, count: cur.count + 1 });
+  }
+
+  const wm = Math.max(1, windowMonths);
+  const byCategory: BigPurchaseAmortRow[] = [...totals.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([id, { total, count }]) => ({
+      category_id:      id,
+      label:            CAT_META[id]?.label ?? id,
+      color:            CAT_META[id]?.color ?? '#a8a29e',
+      total,
+      count,
+      monthlyAmortized: total / wm,
+    }));
+
+  const grandTotal       = byCategory.reduce((s, r) => s + r.total, 0);
+  const monthlyAmortized = grandTotal / wm;
+
+  return {
+    byCategory,
+    grandTotal,
+    monthlyAmortized,
+    windowMonths:        wm,
+    annualReserveTarget: monthlyAmortized * 12,
+  };
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 export function fmtCurrency(n: number, opts?: { compact?: boolean; sign?: boolean }): string {

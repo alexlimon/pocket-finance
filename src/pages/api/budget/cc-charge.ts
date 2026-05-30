@@ -17,13 +17,16 @@ export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
   if (!(await verifySession(context.request, env))) return json({ error: 'Unauthorized' }, 401);
 
-  let body: { month?: string; description?: string; amount?: number; card?: string; is_big_purchase?: boolean; date?: string };
+  const VALID_CATEGORIES = new Set(['travel','home','rental','shopping','auto','medical']);
+
+  let body: { month?: string; description?: string; amount?: number; card?: string; is_big_purchase?: boolean; date?: string; category_id?: string | null };
   try { body = await context.request.json() as typeof body; }
   catch { return json({ error: 'Invalid JSON' }, 400); }
 
-  const { month, description, amount, card = 'sapphire', is_big_purchase = false, date } = body;
+  const { month, description, amount, card = 'sapphire', is_big_purchase = false, date, category_id } = body;
   if (!month || !description || amount == null) return json({ error: 'month, description, amount required' }, 400);
   if (!['sapphire','prime','apple','other'].includes(card)) return json({ error: 'Invalid card' }, 400);
+  if (category_id != null && !VALID_CATEGORIES.has(category_id)) return json({ error: 'Invalid category_id' }, 400);
 
   const client = getClient(env);
   try {
@@ -35,9 +38,9 @@ export async function POST(context: APIContext): Promise<Response> {
     const id = crypto.randomUUID();
 
     await client.execute({
-      sql: `INSERT INTO cc_charges (id, month, date, description, amount, card, is_big_purchase, payment_month)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      args: [id, month, date ?? null, description, amount, card, is_big_purchase ? 1 : 0, paymentMonth],
+      sql: `INSERT INTO cc_charges (id, month, date, description, amount, card, is_big_purchase, payment_month, category_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, month, date ?? null, description, amount, card, is_big_purchase ? 1 : 0, paymentMonth, category_id ?? null],
     });
     return json({ ok: true, id, payment_month: paymentMonth }, 201);
   } finally { client.close(); }
@@ -47,20 +50,26 @@ export async function PATCH(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
   if (!(await verifySession(context.request, env))) return json({ error: 'Unauthorized' }, 401);
 
-  let body: { id?: string; description?: string; amount?: number; card?: string; is_big_purchase?: boolean };
+  const VALID_CATEGORIES_PATCH = new Set(['travel','home','rental','shopping','auto','medical']);
+
+  let body: { id?: string; description?: string; amount?: number; card?: string; is_big_purchase?: boolean; category_id?: string | null };
   try { body = await context.request.json() as typeof body; }
   catch { return json({ error: 'Invalid JSON' }, 400); }
 
   const { id, ...fields } = body;
   if (!id) return json({ error: 'id required' }, 400);
+  if ('category_id' in fields && fields.category_id != null && !VALID_CATEGORIES_PATCH.has(fields.category_id as string)) {
+    return json({ error: 'Invalid category_id' }, 400);
+  }
 
-  const allowed = new Set(['description','amount','card','is_big_purchase','date']);
+  const allowed = new Set(['description','amount','card','is_big_purchase','date','category_id']);
   const sets: string[] = [];
   const args: (string | number | null)[] = [];
   for (const [k, v] of Object.entries(fields)) {
     if (!allowed.has(k)) continue;
     sets.push(`${k} = ?`);
-    args.push(k === 'is_big_purchase' ? (v ? 1 : 0) : v as string | number | null);
+    if (k === 'is_big_purchase') args.push(v ? 1 : 0);
+    else args.push(v as string | number | null);
   }
   if (!sets.length) return json({ error: 'Nothing to update' }, 400);
 

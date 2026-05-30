@@ -1,5 +1,24 @@
 /** Budget-specific types and calculations (manual-entry system). */
 
+export interface BigPurchaseCategory {
+  id:    string;
+  label: string;
+  color: string; // hex color
+}
+
+export const BIG_PURCHASE_CATEGORIES: BigPurchaseCategory[] = [
+  { id: 'travel',   label: 'Travel',   color: '#0ea5e9' }, // sky-500
+  { id: 'home',     label: 'Home',     color: '#84cc16' }, // lime-500
+  { id: 'rental',   label: 'Rental',   color: '#8b5cf6' }, // violet-500
+  { id: 'shopping', label: 'Shopping', color: '#f59e0b' }, // amber-500
+  { id: 'auto',     label: 'Auto',     color: '#3b82f6' }, // blue-500
+  { id: 'medical',  label: 'Medical',  color: '#f43f5e' }, // rose-500
+] as const;
+
+export function bigPurchaseCategoryColor(id: string | null | undefined): string {
+  return BIG_PURCHASE_CATEGORIES.find(c => c.id === id)?.color ?? '#a8a29e'; // stone-400 fallback
+}
+
 export interface MonthlySummary {
   month:           string;
   income_alex:     number;
