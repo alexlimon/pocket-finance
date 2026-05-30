@@ -829,22 +829,39 @@ function TopVendorsPanel({ txns }: { txns: CsvTransaction[] }) {
 
 function TopPurchasesPanel({ txns }: { txns: CsvTransaction[] }) {
   const accounts = useMemo(() => [...new Set(txns.map(t => t.account_last4))].sort(), [txns]);
+  const years = useMemo(() => [...new Set(txns.map(t => t.date.slice(0, 4)))].sort().reverse(), [txns]);
   const [filter, setFilter] = useState('all');
+  const [year, setYear] = useState('all');
   const top = useMemo(() => {
     let filtered = txns.filter(isPurchase);
     if (filter !== 'all') filtered = filtered.filter(t => t.account_last4 === filter);
+    if (year !== 'all') filtered = filtered.filter(t => t.date.startsWith(year));
     return filtered.sort((a, b) => a.amount - b.amount).slice(0, 30);
-  }, [txns, filter]);
+  }, [txns, filter, year]);
 
   if (!txns.length) return <EmptyState message="No transaction data yet." />;
   return (
     <div className="space-y-3">
-      <div className="flex gap-1.5">
+      <div className="flex flex-wrap gap-1.5">
         {['all', ...accounts].map(f => (
           <button key={f} onClick={() => setFilter(f)}
             className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors
               ${filter === f ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'}`}>
-            {f === 'all' ? 'All' : acctLabel(f)}
+            {f === 'all' ? 'All accounts' : acctLabel(f)}
+          </button>
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        <button onClick={() => setYear('all')}
+          className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors
+            ${year === 'all' ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'}`}>
+          All years
+        </button>
+        {years.map(y => (
+          <button key={y} onClick={() => setYear(y)}
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors
+              ${year === y ? 'bg-stone-800 text-white' : 'text-stone-500 hover:bg-stone-100 hover:text-stone-800'}`}>
+            {y}
           </button>
         ))}
       </div>
