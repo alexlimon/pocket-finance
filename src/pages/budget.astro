@@ -527,8 +527,7 @@ const projection = projectCCSpend({
     </div>
     <div class="flex gap-4 text-right text-sm">
       <div><p class="text-xs text-stone-400">Variable</p><p class="tabular-nums text-stone-600" id="cc-variable-val2">{fmt(ccVariableOnly)}</p></div>
-      <div><p class="text-xs text-stone-400">Big Purchases</p><p class="tabular-nums text-stone-500" id="cc-big-val">{fmt(ccBig)}</p></div>
-      <div><p class="text-xs text-stone-400">Total Charged</p><p class="tabular-nums font-medium text-stone-700" id="cc-total-val">{fmt(ccTotalCharged)}</p></div>
+      <div><p class="text-xs text-stone-400">incl. Big Purchases</p><p class="tabular-nums text-stone-500" id="cc-big-val">{fmt(ccBig)}</p></div>
     </div>
   </div>
   <div class="h-2 rounded-full bg-surface overflow-hidden flex gap-0">
@@ -599,7 +598,7 @@ const projection = projectCCSpend({
       <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
     </div>
   )}
-  <p class="mt-1 text-xs text-stone-400">Variable spend counts against budget. Big purchases are tracked separately (shown in gray). Recurring subscriptions are separate.</p>
+  <p class="mt-1 text-xs text-stone-400">Variable spend counts against budget and already includes big purchases (shown separately for tracking). Recurring subscriptions are separate.</p>
 </div>
 
 <!-- CC Recurring Subscriptions -->
@@ -796,11 +795,10 @@ function recomputeCC() {
     bigCC += parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
   });
 
-  // Ambient drives the bar and remaining; big purchases shown separately
+  // Ambient drives the bar and remaining; big purchases are already included in variableOnly
   const remaining = budget - variableOnly;
   const pct       = Math.min(variableOnly / budget * 100, 100);
   const bigPct    = Math.min(bigCC / budget * 100, Math.max(0, 100 - pct));
-  const total     = variableOnly + bigCC;  // for "Total Charged" display
 
   const remEl = document.getElementById('cc-remaining-val');
   if (remEl) {
@@ -810,7 +808,6 @@ function recomputeCC() {
   const varEl = document.getElementById('cc-variable-val'); if (varEl) varEl.textContent = usd(variableOnly);
   const varEl2 = document.getElementById('cc-variable-val2'); if (varEl2) varEl2.textContent = usd(variableOnly);
   const bigEl = document.getElementById('cc-big-val');       if (bigEl) bigEl.textContent = usd(bigCC);
-  const totEl = document.getElementById('cc-total-val');     if (totEl) totEl.textContent = usd(total);
   const bar    = document.getElementById('cc-bar') as HTMLElement;
   const barBig = document.getElementById('cc-bar-big') as HTMLElement;
   if (bar) { bar.style.width = pct.toFixed(1)+'%'; bar.className = bar.className.replace(/bg-brand-\w+/g,'')+(pct>=100?' bg-brand-red':pct>=80?' bg-brand-yellow':' bg-brand-green'); }
