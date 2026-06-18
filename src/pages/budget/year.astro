@@ -20,9 +20,10 @@ let ccByMonth: Record<string, CCCharge[]> = {};
 let ccVariableByMonth: Record<string, number> = {};
 let cashIncomeByMonth: Record<string, number> = {};
 let bigPurchaseRows: { category_id: string | null; amount: number; month: string }[] = [];
+let billingEndDay = 18;
 
 try {
-  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes, cashIncomeRes] = await Promise.all([
+  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes, cashIncomeRes, ccSettingsRes] = await Promise.all([
     client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
     // All non-CC recurring bills (the defaults)
     client.execute({
@@ -42,6 +43,7 @@ try {
       args: [`${year}-%`],
     }),
     client.execute({ sql: `SELECT month, SUM(amount) as total FROM cash_expenses WHERE month LIKE ? AND type = 'income' GROUP BY month`, args: [`${year}-%`] }),
+    client.execute({ sql: `SELECT MIN(billing_end_day) as day FROM cc_settings`, args: [] }),
   ]);
 
   for (const r of sumRes.rows) {
@@ -81,6 +83,8 @@ try {
   for (const r of cashIncomeRes.rows as unknown as { month: string; total: number }[]) {
     cashIncomeByMonth[r.month] = Number(r.total);
   }
+  const settingsRow = ccSettingsRes.rows[0] as unknown as { day: number } | undefined;
+  if (settingsRow?.day) billingEndDay = Number(settingsRow.day);
 } finally { client.close(); }
 
 const amort = amortizeBigPurchases(bigPurchaseRows, months.filter(m => m <= String(new Date().toISOString().slice(0,7))).length || 12);
@@ -89,7 +93,13 @@ function getOrEmpty(month: string): MonthlySummary {
   return summaries[month] ?? { month, income_alex:0,income_maham:0,income_other:0,checking_before:0,checking_after:0,savings_before:0,savings_after:0,cc_budget:5000,notes:null };
 }
 
+const today = new Date();
 function ccSpend(month: string): number {
+  const [y, mo] = month.split('-').map(Number);
+  const billingCutoff = new Date(y, mo - 1, billingEndDay);
+  if (today < billingCutoff) {
+    return Number(getOrEmpty(month).cc_budget ?? 0);
+  }
   return ccVariableByMonth[prevMonth(month)] ?? 0;
 }
 const CC_PAYMENT_PATTERN = /cc\s*payment|credit\s*card\s*payment/i;
