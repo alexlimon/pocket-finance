@@ -60,9 +60,7 @@ export async function GET(context: APIContext): Promise<Response> {
     return pay ? pay.amount : Number(cfg?.monthly_target ?? 0);
   }
   function ccTotal(month: string): number {
-    const variable     = ccVarByMonth[month] ?? 0;
-    const bigPurchases = (ccByMonth[month] ?? []).reduce((s, c) => s + c.amount, 0);
-    return variable + bigPurchases;
+    return ccVarByMonth[month] ?? 0;
   }
 
   // Build rows

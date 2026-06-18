@@ -2,7 +2,7 @@
 import Layout from '../../layouts/Layout.astro';
 import { verifySession } from '../../lib/auth';
 import { getClient } from '../../lib/db';
-import { fmt, totalIncome, type MonthlySummary, type CCCharge } from '../../lib/budget';
+import { fmt, totalIncome, prevMonth, type MonthlySummary, type CCCharge } from '../../lib/budget';
 import { amortizeBigPurchases } from '../../lib/insights';
 
 const env = Astro.locals.runtime.env;
@@ -18,10 +18,11 @@ let summaries: Record<string, MonthlySummary> = {};
 let billsByMonth: Record<string, { id: string; name: string; actual_amount: number; is_cc: number }[]> = {};
 let ccByMonth: Record<string, CCCharge[]> = {};
 let ccVariableByMonth: Record<string, number> = {};
+let cashIncomeByMonth: Record<string, number> = {};
 let bigPurchaseRows: { category_id: string | null; amount: number; month: string }[] = [];
 
 try {
-  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes] = await Promise.all([
+  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes, cashIncomeRes] = await Promise.all([
     client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
     // All non-CC recurring bills (the defaults)
     client.execute({
@@ -34,12 +35,13 @@ try {
       args: [`${year}-%`],
     }),
     client.execute({ sql: `SELECT * FROM cc_charges WHERE month LIKE ?`, args: [`${year}-%`] }),
-    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month LIKE ? GROUP BY month`, args: [`${year}-%`] }),
+    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month LIKE ? OR month = ? GROUP BY month`, args: [`${year}-%`, `${Number(year)-1}-12`] }),
     // Big purchases for the year (for amortization panel)
     client.execute({
       sql: `SELECT category_id, amount, month FROM cc_charges WHERE month LIKE ? AND is_big_purchase = 1`,
       args: [`${year}-%`],
     }),
+    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cash_expenses WHERE month LIKE ? AND type = 'income' GROUP BY month`, args: [`${year}-%`] }),
   ]);
 
   for (const r of sumRes.rows) {
@@ -76,6 +78,9 @@ try {
     ccVariableByMonth[r.month] = Number(r.total);
   }
   bigPurchaseRows = bigRes.rows as unknown as typeof bigPurchaseRows;
+  for (const r of cashIncomeRes.rows as unknown as { month: string; total: number }[]) {
+    cashIncomeByMonth[r.month] = Number(r.total);
+  }
 } finally { client.close(); }
 
 const amort = amortizeBigPurchases(bigPurchaseRows, months.filter(m => m <= String(new Date().toISOString().slice(0,7))).length || 12);
@@ -85,16 +90,20 @@ function getOrEmpty(month: string): MonthlySummary {
 }
 
 function ccSpend(month: string): number {
-  const bigPurchases = (ccByMonth[month] ?? []).reduce((s, c) => s + c.amount, 0);
-  const variable     = ccVariableByMonth[month] ?? 0;
-  return variable + bigPurchases;
+  return ccVariableByMonth[prevMonth(month)] ?? 0;
 }
+const CC_PAYMENT_PATTERN = /cc\s*payment|credit\s*card\s*payment/i;
 function checkingOut(month: string): number {
-  return (billsByMonth[month] ?? []).filter((b:any)=>!b.is_cc).reduce((s:number,b:any)=>s+Number(b.actual_amount),0);
+  return (billsByMonth[month] ?? [])
+    .filter((b: any) => !b.is_cc && !CC_PAYMENT_PATTERN.test(b.name))
+    .reduce((s: number, b: any) => s + Number(b.actual_amount), 0);
+}
+function otherIncome(month: string): number {
+  return cashIncomeByMonth[month] ?? 0;
 }
 function netForMonth(month: string): number {
   const s = getOrEmpty(month);
-  return totalIncome(s) - checkingOut(month) - ccSpend(month);
+  return totalIncome(s) + otherIncome(month) - checkingOut(month) - ccSpend(month);
 }
 ---
 
@@ -127,16 +136,15 @@ function netForMonth(month: string): number {
       <tbody class="divide-y divide-surface-border bg-surface-card">
         {/* Income rows */}
         {[
-          { label: 'Alex Income',   key: 'income_alex' },
-          { label: 'Maham Income',  key: 'income_maham' },
-          { label: 'Other Income',  key: 'income_other' },
-        ].map(({ label, key }) => {
-          const values = months.map(m => Number(getOrEmpty(m)[key as keyof MonthlySummary] ?? 0));
-          const total  = values.reduce((a, b) => a + b, 0);
+          { label: 'Alex Income',  values: months.map(m => Number(getOrEmpty(m).income_alex ?? 0)) },
+          { label: 'Maham Income', values: months.map(m => Number(getOrEmpty(m).income_maham ?? 0)) },
+          { label: 'Other Income', values: months.map(m => otherIncome(m)) },
+        ].map(({ label, values }) => {
+          const total = values.reduce((a, b) => a + b, 0);
           return (
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">{label}</td>
-              {values.map((v, i) => (
+              {values.map((v) => (
                 <td class="px-2 py-2 text-right tabular-nums text-brand-green">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
               ))}
               <td class="px-3 py-2 text-right tabular-nums font-medium text-brand-green">{total ? fmt(total) : '—'}</td>
@@ -241,6 +249,39 @@ function netForMonth(month: string): number {
                 </td>
               ))}
               <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* Separator before summary */}
+        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+
+        {/* Total Income summary */}
+        {(() => {
+          const values = months.map(m => { const s = getOrEmpty(m); return totalIncome(s) + otherIncome(m); });
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-1.5 text-xs text-stone-400">Total Income</td>
+              {values.map(v => (
+                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* Total Expenses summary */}
+        {(() => {
+          const values = months.map(m => checkingOut(m) + ccSpend(m));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-1.5 text-xs text-stone-400">Total Expenses</td>
+              {values.map(v => (
+                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? fmt(total) : '—'}</td>
             </tr>
           );
         })()}

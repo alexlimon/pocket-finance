@@ -200,8 +200,8 @@ export function computeCCSpendingTracker(params: {
   const ccVariableTotal   = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
   const ccVariableOnly    = Math.max(0, ccVariableTotal - ccRecurringInVariable);
   const ccBig             = bigPurchases.reduce((s, c) => s + c.amount, 0);
-  const ccUsed            = ccVariableOnly;           // ambient-only drives bar/pacing
-  const ccTotalCharged    = ccVariableOnly + ccBig;   // true total for display
+  const ccUsed            = ccVariableOnly;  // drives bar/pacing
+  const ccTotalCharged    = ccVariableOnly;  // big purchases are already included in variable spend
   const ccRemaining       = ccSpendBudget - ccUsed;
   const ccUsedPct         = Math.min((ccUsed / ccSpendBudget) * 100, 100);
 
