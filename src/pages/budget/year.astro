@@ -19,11 +19,12 @@ let billsByMonth: Record<string, { id: string; name: string; actual_amount: numb
 let ccByMonth: Record<string, CCCharge[]> = {};
 let ccVariableByMonth: Record<string, number> = {};
 let cashIncomeByMonth: Record<string, number> = {};
+let cashExpenseByMonth: Record<string, number> = {};
 let bigPurchaseRows: { category_id: string | null; amount: number; month: string }[] = [];
 let billingEndDay = 18;
 
 try {
-  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes, cashIncomeRes, ccSettingsRes] = await Promise.all([
+  const [sumRes, configRes, payRes, ccRes, ccVarRes, bigRes, cashIncomeRes, ccSettingsRes, cashExpenseRes] = await Promise.all([
     client.execute({ sql: `SELECT * FROM monthly_summary WHERE month LIKE ?`, args: [`${year}-%`] }),
     // All non-CC recurring bills (the defaults)
     client.execute({
@@ -44,6 +45,7 @@ try {
     }),
     client.execute({ sql: `SELECT month, SUM(amount) as total FROM cash_expenses WHERE month LIKE ? AND type = 'income' GROUP BY month`, args: [`${year}-%`] }),
     client.execute({ sql: `SELECT MIN(billing_end_day) as day FROM cc_settings`, args: [] }),
+    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cash_expenses WHERE month LIKE ? AND type = 'expense' GROUP BY month`, args: [`${year}-%`] }),
   ]);
 
   for (const r of sumRes.rows) {
@@ -85,6 +87,9 @@ try {
   }
   const settingsRow = ccSettingsRes.rows[0] as unknown as { day: number } | undefined;
   if (settingsRow?.day) billingEndDay = Number(settingsRow.day);
+  for (const r of cashExpenseRes.rows as unknown as { month: string; total: number }[]) {
+    cashExpenseByMonth[r.month] = Number(r.total);
+  }
 } finally { client.close(); }
 
 const amort = amortizeBigPurchases(bigPurchaseRows, months.filter(m => m <= String(new Date().toISOString().slice(0,7))).length || 12);
@@ -111,9 +116,12 @@ function checkingOut(month: string): number {
 function otherIncome(month: string): number {
   return cashIncomeByMonth[month] ?? 0;
 }
+function cashExpense(month: string): number {
+  return cashExpenseByMonth[month] ?? 0;
+}
 function netForMonth(month: string): number {
   const s = getOrEmpty(month);
-  return totalIncome(s) + otherIncome(month) - checkingOut(month) - ccSpend(month);
+  return totalIncome(s) + otherIncome(month) - checkingOut(month) - ccSpend(month) - cashExpense(month);
 }
 ---
 
@@ -171,7 +179,15 @@ function netForMonth(month: string): number {
           const total  = values.reduce((a,b)=>a+b,0);
           return (
             <tr class="hover:bg-surface-hover">
-              <td class="px-3 py-2 text-stone-500">Fixed Bills</td>
+              <td class="px-3 py-2 text-stone-500">
+                <span class="relative group inline-flex items-center gap-1">
+                  Fixed Bills
+                  <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                    Cash expenses that are fixed recurring bills — mortgage, utilities, and other bills always paid in cash.
+                  </span>
+                </span>
+              </td>
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
               ))}
@@ -186,7 +202,38 @@ function netForMonth(month: string): number {
           const total  = values.reduce((a,b)=>a+b,0);
           return (
             <tr class="hover:bg-surface-hover">
-              <td class="px-3 py-2 text-stone-500">CC Spend</td>
+              <td class="px-3 py-2 text-stone-500">
+                <span class="relative group inline-flex items-center gap-1">
+                  CC Spend
+                  <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                    Total credit card usage — includes food, shopping, and everything else that is not a fixed bill.
+                  </span>
+                </span>
+              </td>
+              {values.map(v => (
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+              ))}
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+            </tr>
+          );
+        })()}
+
+        {/* Cash Expenses */}
+        {(() => {
+          const values = months.map(m => cashExpense(m));
+          const total  = values.reduce((a,b)=>a+b,0);
+          return (
+            <tr class="hover:bg-surface-hover">
+              <td class="px-3 py-2 text-stone-500">
+                <span class="relative group inline-flex items-center gap-1">
+                  Unaccounted Cash Expenses
+                  <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                    One-off cash outflows entered manually — separate from fixed recurring bills (rent, utilities, etc.)
+                  </span>
+                </span>
+              </td>
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
               ))}
@@ -201,7 +248,15 @@ function netForMonth(month: string): number {
           const total  = values.reduce((a,b)=>a+b,0);
           return (
             <tr class="hover:bg-surface-hover">
-              <td class="px-3 py-2 text-stone-400">CC Budget</td>
+              <td class="px-3 py-2 text-stone-400">
+                <span class="relative group inline-flex items-center gap-1">
+                  CC Budget
+                  <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                    The planned spending limit set for each month's credit card cycle. Used as the CC Spend estimate for months whose billing date hasn't passed yet.
+                  </span>
+                </span>
+              </td>
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-400">{fmt(v)}</td>
               ))}
@@ -283,7 +338,7 @@ function netForMonth(month: string): number {
 
         {/* Total Expenses summary */}
         {(() => {
-          const values = months.map(m => checkingOut(m) + ccSpend(m));
+          const values = months.map(m => checkingOut(m) + ccSpend(m) + cashExpense(m));
           const total  = values.reduce((a,b)=>a+b,0);
           return (
             <tr class="hover:bg-surface-hover">
