@@ -195,7 +195,7 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
             sql:  `INSERT INTO cc_variable_spend (month, card, amount, statement_balance, balance_updated_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ','now'))
                    ON CONFLICT(month, card) DO UPDATE SET
-                     amount = excluded.amount,
+                     amount = CASE WHEN cc_variable_spend.statement_balance IS NOT NULL THEN cc_variable_spend.amount ELSE excluded.amount END,
                      statement_balance    = COALESCE(cc_variable_spend.statement_balance, excluded.statement_balance),
                      balance_updated_at   = excluded.balance_updated_at,
                      updated_at           = excluded.updated_at`,
