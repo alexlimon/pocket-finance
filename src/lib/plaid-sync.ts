@@ -38,12 +38,15 @@ interface SpendWrites {
  *   current month ← limit - available
  *
  * Phase 2 — Statement closed, payment pending (billing_end_day → payment_day of next month):
- *   current month ← existingStatementBalance (locked on first Phase 2 sync, never updated again)
+ *   current month ← settled  (the closed statement amount, frozen against Plaid overwrites)
  *   next month    ← max(0, (limit - available) - settled)  (post-statement charges)
  *
- *   existingStatementBalance is read from the DB before calling this function. If null (first
- *   time entering Phase 2), Plaid's live `current` is snapshotted as the statement balance.
- *   COALESCE in the upsert SQL ensures subsequent syncs never overwrite a stored snapshot.
+ *   `settled` is the editable `amount` of the closed-statement month, so a manual correction
+ *   (refund posted, pending that never settled) flows through to the post-statement number.
+ *   On the FIRST Phase 2 sync the statement balance has not been snapshotted yet
+ *   (statement_balance IS NULL), so Plaid's live `current` is used and stored; from then on
+ *   the editable `amount` is the source of truth and statement_balance is just a "snapshotted"
+ *   flag. COALESCE/CASE in the upsert SQL keep both frozen against later Plaid syncs.
  *
  * Phase 3 — After payment (after payment_day of next month):
  *   next month ← limit - available  (fresh cycle, no subtraction needed)
@@ -56,6 +59,8 @@ function computeSpendWrites(
   existingStatementBalance: number | null,
   prevMonthStatementBalance: number | null,
   balanceUpdatedAt: string | null,
+  existingAmount: number | null = null,
+  prevMonthAmount: number | null = null,
 ): SpendWrites {
   const today      = new Date();
   const day        = today.getDate();
@@ -72,7 +77,7 @@ function computeSpendWrites(
   // Example: billing_end_day=18, payment_day=15 → May 1–14 is still paying the April statement.
   if (day < billing_end_day && day < payment_day) {
     const settled       = prevMonthStatementBalance !== null
-      ? prevMonthStatementBalance
+      ? (prevMonthAmount ?? prevMonthStatementBalance)
       : Math.round(current * 100) / 100;
     const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
     return {
@@ -98,9 +103,10 @@ function computeSpendWrites(
   }
 
   // Phase 2: statement just closed this month, payment still pending next month.
-  // Use the stored snapshot if available; otherwise snapshot Plaid's live current balance.
+  // Once snapshotted, the editable `amount` is the source of truth (manual corrections flow
+  // into the post-statement number); otherwise snapshot Plaid's live current balance.
   const settled       = existingStatementBalance !== null
-    ? existingStatementBalance
+    ? (existingAmount ?? existingStatementBalance)
     : Math.round(current * 100) / 100;
   const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
 
@@ -130,16 +136,20 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
     const thisMonth    = yyyyMM(today);
     const prevMonthStr = yyyyMM(new Date(today.getFullYear(), today.getMonth() - 1, 1));
     const sbRes = await client.execute({
-      sql:  'SELECT card, month, statement_balance FROM cc_variable_spend WHERE month IN (?, ?)',
+      sql:  'SELECT card, month, statement_balance, amount FROM cc_variable_spend WHERE month IN (?, ?)',
       args: [thisMonth, prevMonthStr],
     });
     const storedStatementBalances     = new Map<string, number | null>();
     const prevMonthStatementBalances  = new Map<string, number | null>();
+    const storedAmounts               = new Map<string, number | null>();
+    const prevMonthAmounts            = new Map<string, number | null>();
     for (const r of sbRes.rows) {
-      const val = r.statement_balance !== null && r.statement_balance !== undefined
+      const sb = r.statement_balance !== null && r.statement_balance !== undefined
         ? Number(r.statement_balance) : null;
-      if (String(r.month) === thisMonth)    storedStatementBalances.set(String(r.card), val);
-      if (String(r.month) === prevMonthStr) prevMonthStatementBalances.set(String(r.card), val);
+      const amt = r.amount !== null && r.amount !== undefined
+        ? Number(r.amount) : null;
+      if (String(r.month) === thisMonth)    { storedStatementBalances.set(String(r.card), sb);    storedAmounts.set(String(r.card), amt); }
+      if (String(r.month) === prevMonthStr) { prevMonthStatementBalances.set(String(r.card), sb); prevMonthAmounts.set(String(r.card), amt); }
     }
 
     const items = await client.execute({ sql: 'SELECT id, access_token, institution_name FROM plaid_items', args: [] });
@@ -178,6 +188,8 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
 
         const existingSB      = storedStatementBalances.get(mapping.card) ?? null;
         const prevSB          = prevMonthStatementBalances.get(mapping.card) ?? null;
+        const existingAmt     = storedAmounts.get(mapping.card) ?? null;
+        const prevAmt         = prevMonthAmounts.get(mapping.card) ?? null;
         const balanceUpdatedAt = acct.balances.balance_last_updated ?? null;
 
         const { entries } = computeSpendWrites(
@@ -188,6 +200,8 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
           existingSB,
           prevSB,
           balanceUpdatedAt,
+          existingAmt,
+          prevAmt,
         );
 
         for (const { month, amount, statementBalance, balanceUpdatedAt: bua } of entries) {
