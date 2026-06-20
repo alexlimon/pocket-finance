@@ -81,45 +81,49 @@ export async function POST(context: APIContext): Promise<Response> {
   // Description substrings to skip for checking accounts: mortgage payments
   const CHECKING_SKIP_DESC = ['JPMORGAN CHASE   CHASE ACH', 'PROVIDENT FUNDIN ACH PMT'];
 
+  const stmts: { sql: string; args: (string | number | null)[] }[] = [];
+  let skippedFromRules = 0;
+
+  for (const line of lines.slice(1)) {
+    const f = parseCSVLine(line);
+    const rawDate   = f[dateIdx]   ?? '';
+    const rawPost   = postIdx   >= 0 ? (f[postIdx]   ?? '') : '';
+    const desc      = f[descIdx]   ?? '';
+    const category  = catIdx   >= 0 ? (f[catIdx]   ?? '') : '';
+    const type      = typeIdx  >= 0 ? (f[typeIdx]  ?? '') : '';
+    const rawAmount = amountIdx >= 0 ? (f[amountIdx] ?? '0') : '0';
+    const memo      = memoIdx  >= 0 ? (f[memoIdx]  ?? '') : '';
+
+    if (!rawDate || !desc) continue;
+    const amount = parseFloat(rawAmount);
+    if (isNaN(amount)) continue;
+
+    // Skip CC payments, savings transfers, and mortgage payments for checking accounts
+    if (isChecking && CHECKING_SKIP_TYPES.has(type)) { skippedFromRules++; continue; }
+    if (isChecking && CHECKING_SKIP_DESC.some(s => desc.includes(s))) { skippedFromRules++; continue; }
+
+    const date     = parseDate(rawDate);
+    const postDate = rawPost ? parseDate(rawPost) : null;
+    const id       = makeId(account_last4, date, desc, rawAmount);
+
+    stmts.push({
+      sql: `INSERT OR IGNORE INTO csv_transactions
+            (id, account_last4, account_source, date, post_date, description, category, type, amount, memo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [id, account_last4, account_source, date, postDate, desc,
+             category || null, type || null, amount, memo || null],
+    });
+  }
+
   const client = getClient(env);
-  let inserted = 0;
-  let skipped = 0;
-
   try {
-    for (const line of lines.slice(1)) {
-      const f = parseCSVLine(line);
-      const rawDate   = f[dateIdx]   ?? '';
-      const rawPost   = postIdx   >= 0 ? (f[postIdx]   ?? '') : '';
-      const desc      = f[descIdx]   ?? '';
-      const category  = catIdx   >= 0 ? (f[catIdx]   ?? '') : '';
-      const type      = typeIdx  >= 0 ? (f[typeIdx]  ?? '') : '';
-      const rawAmount = amountIdx >= 0 ? (f[amountIdx] ?? '0') : '0';
-      const memo      = memoIdx  >= 0 ? (f[memoIdx]  ?? '') : '';
-
-      if (!rawDate || !desc) continue;
-      const amount = parseFloat(rawAmount);
-      if (isNaN(amount)) continue;
-
-      // Skip CC payments, savings transfers, and mortgage payments for checking accounts
-      if (isChecking && CHECKING_SKIP_TYPES.has(type)) { skipped++; continue; }
-      if (isChecking && CHECKING_SKIP_DESC.some(s => desc.includes(s))) { skipped++; continue; }
-
-      const date     = parseDate(rawDate);
-      const postDate = rawPost ? parseDate(rawPost) : null;
-      const id       = makeId(account_last4, date, desc, rawAmount);
-
-      const result = await client.execute({
-        sql: `INSERT OR IGNORE INTO csv_transactions
-              (id, account_last4, account_source, date, post_date, description, category, type, amount, memo)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        args: [id, account_last4, account_source, date, postDate, desc,
-               category || null, type || null, amount, memo || null],
-      });
-
-      if (result.rowsAffected > 0) inserted++;
-      else skipped++;
+    const CHUNK = 200;
+    let inserted = 0;
+    for (let i = 0; i < stmts.length; i += CHUNK) {
+      const results = await client.batch(stmts.slice(i, i + CHUNK), 'write');
+      for (const r of results) inserted += Number(r.rowsAffected);
     }
-
+    const skipped = skippedFromRules + (stmts.length - inserted);
     return json({ ok: true, inserted, skipped, account: account_last4 });
   } finally {
     client.close();
