@@ -84,3 +84,39 @@ export async function destroySession(env: Env): Promise<void> {
     client.close();
   }
 }
+
+const API_KEY_KEY = 'api_key_hash';
+
+/** Verify the Authorization: Bearer <key> header against the stored API-key hash. */
+export async function verifyApiKey(request: Request, env: Env): Promise<boolean> {
+  const auth = request.headers.get('Authorization') ?? '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const presentedHash = await hashPassword(m[1].trim());
+  const client = getClient(env);
+  try {
+    const result = await client.execute({
+      sql:  `SELECT value FROM settings WHERE key = ? LIMIT 1`,
+      args: [API_KEY_KEY],
+    });
+    return result.rows.length > 0 && String(result.rows[0].value) === presentedHash;
+  } finally {
+    client.close();
+  }
+}
+
+/** Generate a new API key, store its hash, and return the plaintext key (shown once). */
+export async function setApiKey(env: Env): Promise<string> {
+  const key  = `pf_${randomToken(32)}`;
+  const hash = await hashPassword(key);
+  const client = getClient(env);
+  try {
+    await client.execute({
+      sql:  `INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)`,
+      args: [API_KEY_KEY, hash],
+    });
+  } finally {
+    client.close();
+  }
+  return key;
+}
