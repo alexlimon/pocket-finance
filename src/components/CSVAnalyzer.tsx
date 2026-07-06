@@ -33,7 +33,7 @@ interface AmazonMatch {
   all_items_raw:  string | null;
 }
 
-type Tab = 'upload' | 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top' | 'vendors' | 'mortgage';
+type Tab = 'upload' | 'suggestions' | 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top' | 'vendors' | 'mortgage';
 
 interface Props {
   initialTransactions: string;
@@ -59,6 +59,23 @@ function monthLabel(ym: string): string {
 
 function isPurchase(t: CsvTransaction): boolean {
   return t.amount < 0 && t.type?.toLowerCase() !== 'payment';
+}
+
+// UTC weekday, parsed manually to avoid local-timezone drift. 0 = Sun … 6 = Sat.
+function isWeekend(iso: string): boolean {
+  const [y, m, d] = iso.split('-').map(Number);
+  const day = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+// The 3 calendar months immediately before `ym` (YYYY-MM), oldest→newest.
+function priorMonths(ym: string, n: number): string[] {
+  const [y, m] = ym.split('-').map(Number);
+  const base = y * 12 + (m - 1);
+  return Array.from({ length: n }, (_, i) => {
+    const idx = base - n + i;
+    return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
+  });
 }
 
 // ── Computations ──────────────────────────────────────────────────────────────
@@ -897,9 +914,257 @@ function TopPurchasesPanel({ txns }: { txns: CsvTransaction[] }) {
   );
 }
 
+// ── Panel: Suggestions ────────────────────────────────────────────────────────
+// Behavioral "stop doing this" callouts for one month vs the prior 3 months.
+// All spend magnitudes use Math.abs (CSV convention: negative = money out).
+
+interface LeanCategory {
+  cat:     string;
+  lean:    number;   // spent in the leanest month
+  avg:     number;   // average monthly spend across the previous year
+  current: number;   // spent this month
+}
+
+interface Benchmark {
+  leanMonth:  string;         // leanest month within the previous year
+  leanTotal:  number;
+  avgSpend:   number;         // average month across the previous year
+  target:     number;         // a realistic "medium" between lean and average
+  categories: LeanCategory[]; // per-category: leanest month vs this month
+}
+
+interface Suggestions {
+  month:          string;
+  total:          number;
+  txnCount:       number;
+  baselineMonths: number;
+  topMerchants:   { vendor: string; count: number; total: number }[];
+  smallCount:     number;
+  smallTotal:     number;
+  weekendShare:   number;
+  benchmark:      Benchmark | null;
+  headlines:      string[];
+}
+
+const SMALL_PURCHASE   = 15;
+const BASELINE_WINDOW  = 12;  // "the previous year" — trailing 12 months
+const MIN_REAL_TXNS    = 5;   // a month with fewer looks like a partial statement
+const MATERIAL_OVERAGE = 150; // dollar gap vs the lean month worth a headline
+
+function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions {
+  const purchases = txns.filter(isPurchase);
+  const cur  = purchases.filter(t => t.date.slice(0, 7) === month);
+  const baseMonthSet = new Set(priorMonths(month, BASELINE_WINDOW));
+  const base = purchases.filter(t => baseMonthSet.has(t.date.slice(0, 7)));
+
+  const total = cur.reduce((s, t) => s + Math.abs(t.amount), 0);
+
+  // Top merchants this month, grouped by normalized vendor, labeled with the
+  // longest raw description (matches Top Vendors / Subscriptions convention).
+  const byVendor = new Map<string, CsvTransaction[]>();
+  for (const t of cur) {
+    const key = normalizeVendor(t.description);
+    if (!byVendor.has(key)) byVendor.set(key, []);
+    byVendor.get(key)!.push(t);
+  }
+  const merchants = [...byVendor.values()].map(rows => ({
+    vendor: rows.reduce((best, t) => t.description.length > best.length ? t.description : best, ''),
+    count:  rows.length,
+    total:  rows.reduce((s, t) => s + Math.abs(t.amount), 0),
+  }));
+  const topMerchants = [...merchants].sort((a, b) => b.total - a.total).slice(0, 6);
+
+  const curByCat = new Map<string, number>();
+  for (const t of cur) curByCat.set(t.category || 'Other', (curByCat.get(t.category || 'Other') ?? 0) + Math.abs(t.amount));
+
+  const small = cur.filter(t => Math.abs(t.amount) < SMALL_PURCHASE);
+  const smallTotal = small.reduce((s, t) => s + Math.abs(t.amount), 0);
+
+  const weekendSpend = cur.filter(t => isWeekend(t.date)).reduce((s, t) => s + Math.abs(t.amount), 0);
+  const weekendShare = total > 0 ? weekendSpend / total : 0;
+
+  // Benchmark — leanest month within the PREVIOUS YEAR, broken down per
+  // category. Skip near-empty months that are really partial statements.
+  const monthAgg = new Map<string, { total: number; count: number }>();
+  for (const t of base) {
+    const ym = t.date.slice(0, 7);
+    const a = monthAgg.get(ym) ?? { total: 0, count: 0 };
+    a.total += Math.abs(t.amount); a.count += 1;
+    monthAgg.set(ym, a);
+  }
+  const realMonths = [...monthAgg.entries()].filter(([, a]) => a.count >= MIN_REAL_TXNS);
+
+  let benchmark: Benchmark | null = null;
+  if (realMonths.length >= 3) {
+    const [leanMonth, leanAgg] = realMonths.reduce((min, e) => (e[1].total < min[1].total ? e : min));
+    const avgSpend = realMonths.reduce((s, [, a]) => s + a.total, 0) / realMonths.length;
+    const realMonthSet = new Set(realMonths.map(([ym]) => ym));
+
+    const leanByCat = new Map<string, number>();
+    const sumByCat  = new Map<string, number>(); // summed across real months, for the average column
+    for (const t of base) {
+      const ym  = t.date.slice(0, 7);
+      if (!realMonthSet.has(ym)) continue;
+      const cat = t.category || 'Other';
+      sumByCat.set(cat, (sumByCat.get(cat) ?? 0) + Math.abs(t.amount));
+      if (ym === leanMonth) leanByCat.set(cat, (leanByCat.get(cat) ?? 0) + Math.abs(t.amount));
+    }
+    const categories: LeanCategory[] = [...new Set([...curByCat.keys(), ...leanByCat.keys(), ...sumByCat.keys()])]
+      .map(cat => ({
+        cat,
+        lean:    leanByCat.get(cat) ?? 0,
+        avg:     (sumByCat.get(cat) ?? 0) / realMonths.length,
+        current: curByCat.get(cat) ?? 0,
+      }))
+      .filter(c => c.current >= 25 || c.lean >= 25 || c.avg >= 25)
+      .sort((a, b) => (b.current - b.lean) - (a.current - a.lean)) // biggest overspend vs lean first
+      .slice(0, 8);
+
+    benchmark = { leanMonth, leanTotal: leanAgg.total, avgSpend, target: (leanAgg.total + avgSpend) / 2, categories };
+  }
+
+  // Headlines — blunt callouts, ordered by how much they matter in dollars.
+  const headlines: string[] = [];
+
+  if (benchmark && total > benchmark.target * 1.1)
+    headlines.push(`You're ${fmt(total - benchmark.target)} over a realistic target of ${fmt(benchmark.target)} — your leanest month last year was ${monthLabel(benchmark.leanMonth)} at ${fmt(benchmark.leanTotal)}.`);
+
+  const topCat = benchmark?.categories[0];
+  if (topCat && topCat.current - topCat.lean >= MATERIAL_OVERAGE)
+    headlines.push(`${topCat.cat}: ${fmt(topCat.current)} this month vs ${fmt(topCat.lean)} in your leanest month — ${fmt(topCat.current - topCat.lean)} more.`);
+
+  const frequent = [...merchants].sort((a, b) => b.count - a.count)[0];
+  if (frequent && frequent.count >= 8)
+    headlines.push(`${frequent.count} charges from ${frequent.vendor} this month (${fmt(frequent.total)}).`);
+
+  if (small.length >= 15)
+    headlines.push(`${small.length} purchases under ${fmt(SMALL_PURCHASE)} added up to ${fmt(smallTotal)}.`);
+
+  if (weekendShare >= 0.55 && total > 0)
+    headlines.push(`${Math.round(weekendShare * 100)}% of your spend landed on weekends.`);
+
+  return {
+    month, total, txnCount: cur.length, baselineMonths: realMonths.length,
+    topMerchants, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
+  };
+}
+
+function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
+  const months = useMemo(
+    () => [...new Set(txns.filter(isPurchase).map(t => t.date.slice(0, 7)))].sort().reverse(),
+    [txns],
+  );
+  const [month, setMonth] = useState<string>('');
+  const active = month || months[0] || '';
+  const s = useMemo(() => active ? computeSuggestions(txns, active) : null, [txns, active]);
+
+  if (!txns.length) return <EmptyState message="No transaction data yet. Upload CSVs in the Upload tab." />;
+  if (!s || s.txnCount === 0) return <EmptyState message="No purchases found for this month." />;
+
+  return (
+    <div className="space-y-4">
+      {/* Month selector */}
+      <div className="flex items-center gap-2">
+        <label className="text-sm text-stone-500">Month</label>
+        <select value={active} onChange={e => setMonth(e.target.value)}
+          className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-800">
+          {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+        </select>
+        <span className="text-xs text-stone-400">
+          vs {s.baselineMonths}-month history · {fmt(s.total)} total
+        </span>
+      </div>
+
+      {/* Headlines */}
+      {s.headlines.length > 0 ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <ul className="space-y-1.5">
+            {s.headlines.map((h, i) => (
+              <li key={i} className="flex gap-2 text-sm text-stone-700">
+                <span className="text-amber-500">▲</span><span>{h}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-500">
+          No standout patterns this month — spending looks in line with your usual.
+        </div>
+      )}
+
+      {/* Comparing months: leanest month, yearly average, and this month, per category */}
+      {s.benchmark && (
+        <div className="rounded-xl border border-stone-200 bg-white p-4">
+          <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Comparing months</p>
+            <p className="text-xs text-stone-400">
+              {monthLabel(s.benchmark.leanMonth)} was your leanest month · target ~{fmt(s.benchmark.target)}
+            </p>
+          </div>
+
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-stone-100 text-xs text-stone-400">
+                <th className="py-1.5 text-left font-medium">Category</th>
+                <th className="py-1.5 text-right font-medium">{monthLabel(s.benchmark.leanMonth)}</th>
+                <th className="py-1.5 text-right font-medium">Yearly avg</th>
+                <th className="py-1.5 text-right font-medium">This month</th>
+                <th className="py-1.5 text-right font-medium">Δ</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-stone-100">
+              {s.benchmark.categories.map((c, i) => {
+                const delta = c.current - c.lean;
+                return (
+                  <tr key={i}>
+                    <td className="max-w-0 truncate py-1.5 text-stone-700" title={c.cat}>{c.cat}</td>
+                    <td className="py-1.5 text-right tabular-nums text-stone-400">{fmt(c.lean)}</td>
+                    <td className="py-1.5 text-right tabular-nums text-stone-400">{fmt(c.avg)}</td>
+                    <td className="py-1.5 text-right tabular-nums text-stone-700">{fmt(c.current)}</td>
+                    <td className={`py-1.5 text-right tabular-nums font-medium ${delta > 0 ? 'text-red-500' : 'text-lime-600'}`}>
+                      {delta > 0 ? '+' : ''}{fmt(delta)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr className="border-t border-stone-200 font-semibold text-stone-800">
+                <td className="py-1.5 text-left">Total</td>
+                <td className="py-1.5 text-right tabular-nums text-stone-400">{fmt(s.benchmark.leanTotal)}</td>
+                <td className="py-1.5 text-right tabular-nums text-stone-400">{fmt(s.benchmark.avgSpend)}</td>
+                <td className="py-1.5 text-right tabular-nums">{fmt(s.total)}</td>
+                <td className={`py-1.5 text-right tabular-nums ${s.total - s.benchmark.leanTotal > 0 ? 'text-red-500' : 'text-lime-600'}`}>
+                  {s.total - s.benchmark.leanTotal > 0 ? '+' : ''}{fmt(s.total - s.benchmark.leanTotal)}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+
+      {/* Top merchants */}
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top merchants this month</p>
+        <ul className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
+          {s.topMerchants.map((m, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-2 text-sm">
+              <span className="min-w-0 truncate text-stone-600" title={m.vendor}>
+                {m.vendor} <span className="text-stone-400">×{m.count}</span>
+              </span>
+              <span className="shrink-0 tabular-nums font-medium text-stone-800">{fmt(m.total)}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 // ── Nav items ─────────────────────────────────────────────────────────────────
 
 const NAV_ITEMS: { id: Tab; label: string; icon: string }[] = [
+  { id: 'suggestions',   label: 'Suggestions',   icon: '✦' },
   { id: 'subscriptions', label: 'Subscriptions', icon: '↻' },
   { id: 'categories',    label: 'Categories',    icon: '◫' },
   { id: 'vendors',       label: 'Top Vendors',   icon: '⊕' },
@@ -921,7 +1186,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
     catch { return { connected: false, lastSync: null, ordersCount: 0, matchedCount: 0 }; }
   });
   const [matches,      setMatches]      = useState<AmazonMatch[]>([]);
-  const [activeTab,    setActiveTab]    = useState<Tab>('subscriptions');
+  const [activeTab,    setActiveTab]    = useState<Tab>('suggestions');
   const [uploading,    setUploading]    = useState(false);
   const [uploadMsg,    setUploadMsg]    = useState('');
   const [gmailSyncing, setGmailSyncing] = useState(false);
@@ -1009,6 +1274,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
 
   const TAB_TITLES: Record<Tab, string> = {
     upload:        'Upload Data',
+    suggestions:   'Suggestions',
     subscriptions: 'Subscriptions',
     categories:    'Spending by Category',
     amazon:        'Amazon',
@@ -1072,6 +1338,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
             onAmazonUpload={handleAmazonUpload}
           />
         )}
+        {activeTab === 'suggestions'   && <SuggestionsPanel   txns={enrichedTxns} />}
         {activeTab === 'subscriptions' && <SubscriptionsPanel txns={enrichedTxns} />}
         {activeTab === 'categories'    && <CategoriesPanel    txns={enrichedTxns} />}
         {activeTab === 'amazon'        && (
