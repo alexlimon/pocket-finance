@@ -45,9 +45,6 @@ const client = createClient({
 let txnCount = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function id(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-}
 
 async function upsertTx(
   txId:   string,
@@ -195,13 +192,6 @@ console.log('✓ Budget config updated');
 // Sign convention: positive = expense (money out), negative = income (money in).
 // Matching Plaid's consumer account convention.
 console.log('\n[5/5] Creating Jan–Mar transactions…');
-
-type Month = { year: number; mo: string; label: string };
-const months: Month[] = [
-  { year: 2026, mo: '01', label: 'January'  },
-  { year: 2026, mo: '02', label: 'February' },
-  { year: 2026, mo: '03', label: 'March'    },
-];
 
 // ── Raw data keyed by month index (0=Jan,1=Feb,2=Mar) ────────────────────────
 const incomeByMonth: [string, string, number, string, string][] = [

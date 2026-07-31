@@ -1,4 +1,6 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
+import { fmt as fmtExact } from '../lib/budget';
+import { fmtCurrency as fmt } from '../lib/insights';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -104,14 +106,6 @@ function simulate(
 
 function fmtDate(d: Date): string {
   return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-}
-
-function fmt(n: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
-}
-
-function fmtExact(n: number): string {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
 }
 
 // ── Input fields ──────────────────────────────────────────────────────────────

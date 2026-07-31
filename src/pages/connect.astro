@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
-import { currentMonth } from '../lib/budget';
+import { currentMonth, fmt } from '../lib/budget';
 import PlaidLinkButton from '../components/PlaidLink';
 
 const env = Astro.locals.runtime.env;
@@ -66,9 +66,6 @@ function adjustedBalance(account: typeof accounts[0]): { balance: number; label:
   }
 }
 
-function fmt(n: number) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
-}
 ---
 
 <Layout title="Connected Accounts">

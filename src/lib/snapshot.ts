@@ -1,22 +1,6 @@
 import { getClient, type Env } from './db';
-import { aggregateMonth, type BillAggRow, type VariableSpendRow, type MonthAggregate } from './insights';
-import type { MonthlySummary, CCCharge, CashExpense } from './budget';
-
-type BillConfig = {
-  id:             string;
-  name:           string;
-  monthly_target: number | null;
-  is_cc_default:  number;
-  start_month:    string | null;
-  end_month:      string | null;
-};
-
-type BillPayRow = {
-  month:      string;
-  bill_id:    string;
-  amount:     number;
-  is_skipped: number;
-};
+import { aggregateMonth, type BillAggRow, type VariableSpendRow, type MonthAggregate, byMonth } from './insights';
+import type { MonthlySummary, CCCharge, CashExpense, BillConfig, BillPayRow } from './budget';
 
 export interface Snapshot {
   asOf:     string;
@@ -41,12 +25,6 @@ export interface Snapshot {
 }
 
 const CC_PAYMENT_RE = /cc\s*payment|credit\s*card\s*payment/i;
-
-function byMonth<T extends { month: string }>(rows: T[]): Record<string, T[]> {
-  const out: Record<string, T[]> = {};
-  for (const r of rows) (out[r.month] ??= []).push(r);
-  return out;
-}
 
 export async function buildSnapshot(env: Env): Promise<Snapshot> {
   const now = new Date();
