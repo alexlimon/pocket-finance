@@ -92,19 +92,18 @@ export function groupBigPurchasesByPayMonth(
 /**
  * Computes the total CC payment leaving checking this month.
  *
- * Convention (spreadsheet "payment-month" model):
- *   cc_budget[M]           = variable component paid in month M (last month's variable spend)
- *   cc_recurring_budget[M] = recurring component paid in month M (last billing cycle's subs)
- *   CC payment[M]          = cc_budget[M] + recurring component
- *
- * The recurring component switches from "estimated" (sum of monthly_targets) to "actual"
- * (sum of paid amounts) once all subs in this payment cycle are checked off.
+ * cc_budget[M] holds the *full* prior-month CC statement total that is paid in
+ * month M — variable spend + recurring subs + big purchases, all rolled up
+ * (syncCCSpend reconciliation writes the closed statement balance into it).
+ * Therefore CC Payment = cc_budget[M] directly; the recurring component below
+ * is a breakdown-only figure (what portion of that total is subscriptions) and
+ * is NOT added on top, to avoid double-counting.
  */
 export function computeCCPayment(params: {
   ccBills:         ResolvedBill[];
   billingEndDay:   number;
   paymentMonth:    string;   // the month whose payment we're computing (= current month)
-  ccVariableBudget: number;  // summary.cc_budget for this month
+  ccVariableBudget: number;  // summary.cc_budget for this month (full statement total)
 }): {
   ccBillsForPayment:          ResolvedBill[];
   estimatedPaymentRecurring:  number;
@@ -133,7 +132,7 @@ export function computeCCPayment(params: {
     actualPaymentRecurring,
     recurringMode,
     recurringBudget,
-    ccPaymentAmount: ccVariableBudget + recurringBudget,
+    ccPaymentAmount: ccVariableBudget,
   };
 }
 

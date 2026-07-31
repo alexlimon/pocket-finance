@@ -910,7 +910,9 @@ function recalcCashFlow(recurringVal: number) {
   const checkStart       = parseFloat(sec.dataset.checkingStart ?? '0');
   const savingsAlloc     = parseFloat(sec.dataset.savingsAllocation ?? '0');
 
-  const ccPayment  = ccVarBudget + recurringVal;
+  // CC Payment = cc_budget (full statement total, already includes recurring).
+  // recurring shown only as a breakdown, never added on top.
+  const ccPayment  = ccVarBudget;
   const net        = incomeTotal - fixedChecking - ccPayment - otherCashExpense;
   const checkEnd   = checkStart + net - savingsAlloc;
 
