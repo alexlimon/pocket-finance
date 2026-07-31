@@ -6,7 +6,7 @@
  * cc_charges, cash_expenses). No DB access, no side effects.
  */
 
-import type { MonthlySummary, CashExpense, CCCharge } from './budget';
+import type { MonthlySummary, CashExpense, CCCharge, BillRow } from './budget';
 
 // ── Input row shapes (as fetched by index.astro) ─────────────────────────────
 
@@ -14,13 +14,6 @@ export interface VariableSpendRow {
   month:  string;
   card:   string;
   amount: number;
-}
-
-/** Group rows by their `month` field. Shared by snapshot.ts and dashboard.astro. */
-export function byMonth<T extends { month: string }>(rows: T[]): Record<string, T[]> {
-  const out: Record<string, T[]> = {};
-  for (const r of rows) (out[r.month] ??= []).push(r);
-  return out;
 }
 
 /** A bill_payments row joined with its budget_config. Minimal shape we need. */
