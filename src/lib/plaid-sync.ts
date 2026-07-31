@@ -233,6 +233,57 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
     } else {
       await client.execute({ sql: `DELETE FROM settings WHERE key = 'plaid_sync_error'`, args: [] });
     }
+
+    // Propagate closed CC statement totals into next month's cc_budget so the
+    // monthly CC Payment reflects the *actual* prior-month variable spend
+    // (CC payment-month convention: cc_budget[M] = variable spend of M-1).
+    // A month qualifies as "closed" once every *active* card row has a non-null
+    // statement_balance snapshot AND they all carry the same closed flag — i.e.
+    // only settled actuals propagate, never in-progress estimates.
+    //
+    // Dormant card rows (amount = 0 AND statement_balance IS NULL) are excluded
+    // from the count so unused cards (e.g. a pre-seeded 'apple' row that never
+    // gets Plaid-synced) don't block reconciliation of the cards that did close.
+    const closedRes = await client.execute({
+      sql: `
+        WITH active AS (
+          SELECT month, amount, statement_balance
+          FROM cc_variable_spend
+          WHERE amount > 0 OR statement_balance IS NOT NULL
+        ),
+        status AS (
+          SELECT month,
+                 COUNT(*)                  AS total_cards,
+                 COUNT(statement_balance)   AS closed_cards,
+                 SUM(amount)               AS total_amount
+          FROM active
+          GROUP BY month
+        )
+        SELECT month, total_amount
+        FROM status
+        WHERE total_cards > 0
+          AND total_cards = closed_cards
+          AND total_amount > 0`,
+      args: [],
+    });
+
+    for (const r of closedRes.rows) {
+      const billingMonth = String(r.month);
+      const total = Number(r.total_amount) || 0;
+      if (total <= 0) continue;
+      const [y, m] = billingMonth.split('-').map(Number);
+      const payDate = new Date(y, m, 1); // m is 1-indexed → JS month=m wraps to next calendar month
+      const paymentMonth = `${payDate.getFullYear()}-${String(payDate.getMonth() + 1).padStart(2, '0')}`;
+
+      await client.execute({
+        sql:  `INSERT INTO monthly_summary (month, cc_budget) VALUES (?, ?) ON CONFLICT(month) DO NOTHING`,
+        args: [paymentMonth, total],
+      });
+      await client.execute({
+        sql:  `UPDATE monthly_summary SET cc_budget = ? WHERE month = ?`,
+        args: [total, paymentMonth],
+      });
+    }
   } finally {
     client.close();
   }
