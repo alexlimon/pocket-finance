@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
-import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
+import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CashExpense } from '../lib/budget';
 import { syncCCSpend } from '../lib/plaid-sync';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
@@ -162,9 +162,9 @@ const cashFlow = computeCashFlow({
 const balances = computeBalances(summary, cashFlow.netAmount);
 
 // Destructure for template use
-const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
+const { recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
 const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
-        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccTotalCharged, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
+        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
@@ -1306,8 +1306,6 @@ document.querySelectorAll<HTMLButtonElement>('.cc-toggle-big').forEach(btn => {
       btn.dataset.big = newBig ? '1' : '0';
       btn.title = newBig ? 'Move to variable' : 'Mark as big purchase';
       btn.textContent = newBig ? '↑' : '★';
-      // Refresh the group label on the row
-      const bigTag = btn.closest('[data-cc-id]')?.querySelector('.rounded.border');
       recomputeCC();
     } catch { alert('Update failed'); }
   });

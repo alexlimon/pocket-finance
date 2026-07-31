@@ -5,10 +5,10 @@ import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import {
   aggregateMonth, baselineRatio, burnLine, buildSankey,
-  fmtCurrency, fmtPct,
+  fmtCurrency, fmtPct, byMonth,
   type BillAggRow, type VariableSpendRow, type MonthAggregate, type MonthBaseline,
 } from '../lib/insights';
-import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
+import { currentMonth, prevMonth, nextMonth as nextMo, type MonthlySummary, type CashExpense, type CCCharge, type BillConfig, type BillPayRow } from '../lib/budget';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const env = Astro.locals.runtime.env;
@@ -27,9 +27,6 @@ const startMonth = months[0];
 const client = getClient(env);
 const [curYear] = thisMonth.split('-').map(Number);
 const yearEnd = `${curYear}-12`;
-
-type BillConfig = { id: string; name: string; monthly_target: number | null; is_cc_default: number; start_month: string | null; end_month: string | null };
-type BillPayRow = { month: string; bill_id: string; amount: number; is_paid: number; is_skipped: number; is_cc_default: number; monthly_target: number | null };
 
 let summaries: MonthlySummary[]   = [];
 let billPayRows: BillPayRow[]     = [];
@@ -78,12 +75,6 @@ for (const r of billPayRows) {
 }
 
 // ── Group by month ───────────────────────────────────────────────────────────
-function byMonth<T extends { month: string }>(rows: T[]): Record<string, T[]> {
-  const out: Record<string, T[]> = {};
-  for (const r of rows) (out[r.month] ??= []).push(r);
-  return out;
-}
-
 const sumMap   = new Map(summaries.map(s => [s.month, s]));
 const varByM   = byMonth(varSpend);
 const bigByM   = byMonth(bigCharges as unknown as { month: string }[]) as unknown as Record<string, CCCharge[]>;

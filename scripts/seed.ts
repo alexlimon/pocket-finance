@@ -61,7 +61,7 @@ console.log('✓ Tables ready');
 // ── Helper ────────────────────────────────────────────────────────────────────
 async function upsert(table: string, idCol: string, id: string, fields: Record<string, unknown>) {
   const cols   = [idCol, ...Object.keys(fields)];
-  const vals   = [id,    ...Object.values(fields)];
+  const vals   = [id,    ...Object.values(fields)] as (string | number)[];
   const placeholders = vals.map(() => '?').join(', ');
   const updates = Object.keys(fields).map(k => `${k} = excluded.${k}`).join(', ');
 

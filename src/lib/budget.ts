@@ -41,16 +41,24 @@ export interface BillConfig {
   is_cc_default:    number;
   entity_id:        string;
   category_id:      string | null;
+  start_month:      string | null;
+  end_month:        string | null;
 }
 
-export interface BillPayment {
-  id:         string;
-  month:      string;
-  bill_id:    string;
-  amount:     number;
-  is_paid:    number;
-  is_cc:      number;
-  paid_date:  string | null;
+/**
+ * Joined bill_payments × budget_config row shape, as fetched by aggregation
+ * queries (dashboard.astro, snapshot.ts). Fields beyond `is_skipped` come from
+ * the join with budget_config and may be absent for queries that select a
+ * narrower column set — callers that select fewer columns cast via `as unknown`.
+ */
+export interface BillPayRow {
+  month:          string;
+  bill_id:        string;
+  amount:         number;
+  is_paid:        number;
+  is_skipped:     number;
+  is_cc_default:  number;
+  monthly_target: number | null;
 }
 
 export interface BillRow extends BillConfig {
