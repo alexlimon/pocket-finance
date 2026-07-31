@@ -105,6 +105,9 @@ export function computeCCPayment(params: {
   paymentMonth:    string;   // the month whose payment we're computing (= current month)
   ccVariableBudget: number;  // summary.cc_budget for this month (full statement total)
 }): {
+  ccBillsForPayment:          ResolvedBill[];
+  estimatedPaymentRecurring:  number;
+  actualPaymentRecurring:     number;
   recurringMode:              'estimated' | 'actual';
   recurringBudget:            number;
   ccPaymentAmount:            number;
@@ -124,6 +127,9 @@ export function computeCCPayment(params: {
   const recurringBudget = recurringMode === 'actual' ? actualPaymentRecurring : estimatedPaymentRecurring;
 
   return {
+    ccBillsForPayment,
+    estimatedPaymentRecurring,
+    actualPaymentRecurring,
     recurringMode,
     recurringBudget,
     ccPaymentAmount: ccVariableBudget,
@@ -163,13 +169,15 @@ export function computeCCSpendingTracker(params: {
   ccBillsNextPayment:  ResolvedBill[];
   estimatedCCRecurring: number;
   actualCCRecurring:    number;
+  allCCRecurringChecked: boolean;
   ccDisplayMode:        'estimated' | 'actual';
   ccRecurringInVariable: number;
   variableSpendMap:     Map<string, number>;
   ccVariableTotal:      number;
   ccVariableOnly:       number;
   ccBig:                number;
-  ccUsed:               number;   // full statement total, drives the bar/pacing
+  ccUsed:               number;   // ambient-only (variableOnly), drives the bar/pacing
+  ccTotalCharged:       number;   // variableOnly + big purchases, for display
   ccSpendBudget:        number;
   ccRemaining:          number;
   ccUsedPct:            number;
@@ -197,6 +205,7 @@ export function computeCCSpendingTracker(params: {
   const ccVariableOnly    = ccVariableTotal;  // full statement total — recurring is a breakdown, not subtracted
   const ccBig             = bigPurchases.reduce((s, c) => s + c.amount, 0);
   const ccUsed            = ccVariableOnly;  // drives bar/pacing
+  const ccTotalCharged    = ccVariableOnly;  // big purchases are already included in variable spend
   const ccRemaining       = ccSpendBudget - ccUsed;
   const ccUsedPct         = Math.min((ccUsed / ccSpendBudget) * 100, 100);
 
@@ -204,6 +213,7 @@ export function computeCCSpendingTracker(params: {
     ccBillsNextPayment,
     estimatedCCRecurring,
     actualCCRecurring,
+    allCCRecurringChecked,
     ccDisplayMode,
     ccRecurringInVariable,
     variableSpendMap,
@@ -211,6 +221,7 @@ export function computeCCSpendingTracker(params: {
     ccVariableOnly,
     ccBig,
     ccUsed,
+    ccTotalCharged,
     ccSpendBudget,
     ccRemaining,
     ccUsedPct,

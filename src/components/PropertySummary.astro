@@ -1,0 +1,49 @@
+---
+import { formatCurrency, type PropertyPL } from '../lib/finance';
+
+interface Props {
+  kirby:   PropertyPL;
+  kennedy: PropertyPL;
+}
+
+const { kirby, kennedy } = Astro.props;
+
+function netColor(pl: PropertyPL) {
+  return pl.netCashFlow > 0 ? 'text-brand-green' : pl.netCashFlow < 0 ? 'text-brand-red' : 'text-stone-500';
+}
+---
+
+<div class="rounded-xl border border-surface-border bg-surface-card p-4">
+  <h2 class="mb-4 text-xs font-semibold uppercase tracking-wide text-stone-400">Properties (This Month)</h2>
+
+  <div class="space-y-3">
+    {[
+      { label: 'Kirby',   pl: kirby },
+      { label: 'Kennedy', pl: kennedy },
+    ].map(({ label, pl }) => (
+      <div class="rounded-lg bg-surface px-3 py-3 border border-surface-border">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-sm font-medium text-stone-600">{label}</span>
+          <span class={`text-sm font-semibold tabular-nums ${netColor(pl)}`}>
+            {formatCurrency(pl.netCashFlow, { sign: true })}
+          </span>
+        </div>
+        <div class="flex justify-between text-xs text-stone-400">
+          <span>Income: <span class="text-brand-green tabular-nums">{formatCurrency(pl.monthlyIncome)}</span></span>
+          <span>Expenses: <span class="text-stone-500 tabular-nums">{formatCurrency(pl.monthlyExpenses)}</span></span>
+        </div>
+      </div>
+    ))}
+  </div>
+
+  <div class="mt-3 border-t border-surface-border pt-3">
+    <div class="flex justify-between text-xs">
+      <span class="text-stone-400">Combined net</span>
+      <span class={`tabular-nums font-medium ${
+        (kirby.netCashFlow + kennedy.netCashFlow) >= 0 ? 'text-brand-green' : 'text-brand-red'
+      }`}>
+        {formatCurrency(kirby.netCashFlow + kennedy.netCashFlow, { sign: true })}
+      </span>
+    </div>
+  </div>
+</div>

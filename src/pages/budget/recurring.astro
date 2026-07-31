@@ -2,7 +2,6 @@
 import Layout from '../../layouts/Layout.astro';
 import { verifySession } from '../../lib/auth';
 import { getClient } from '../../lib/db';
-import { fmt } from '../../lib/budget';
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
@@ -29,6 +28,10 @@ try {
   items      = itemRes.rows as unknown as typeof items;
   categories = catRes.rows  as unknown as typeof categories;
 } finally { client.close(); }
+
+function fmt(n: number) {
+  return new Intl.NumberFormat('en-US', { style:'currency', currency:'USD' }).format(n);
+}
 ---
 
 <Layout title="Recurring Items">

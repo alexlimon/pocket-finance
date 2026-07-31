@@ -14,10 +14,14 @@ export default {
           green:  '#65a30d',       // lime green (lime zest)
           yellow: '#d97706',       // golden caramel
           red:    '#dc626d',       // soft rose/coral
+          blue:   '#0d9488',       // teal (complementary)
+          lime:   '#84cc16',       // bright lime accent
+          cocoa:  '#78716c',       // cocoa dust
         },
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: ['Inter var', 'Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Fira Code', 'monospace'],
       },
     },
   },

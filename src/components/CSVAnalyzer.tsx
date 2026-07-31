@@ -1,6 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { normalizeVendor } from '../lib/vendor-match';
-import { fmt } from '../lib/budget';
 import MortgageCalculator from './MortgageCalculator';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -42,6 +41,10 @@ interface Props {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+function fmt(n: number): string {
+  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n);
+}
 
 function fmtDate(iso: string): string {
   const [y, m, d] = iso.split('-');

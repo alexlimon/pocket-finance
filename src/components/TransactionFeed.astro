@@ -1,0 +1,55 @@
+---
+import { formatCurrency, type TransactionRow } from '../lib/finance';
+
+interface Props {
+  transactions: TransactionRow[];
+}
+
+const { transactions } = Astro.props;
+---
+
+<div class="rounded-xl border border-surface-border bg-surface-card p-4">
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Recent Transactions</h2>
+    <a href="/transactions" class="text-xs text-stone-400 hover:text-brand-green">View all →</a>
+  </div>
+
+  {transactions.length === 0 ? (
+    <p class="text-center text-sm text-stone-400 py-4">No transactions yet.</p>
+  ) : (
+    <div class="space-y-1">
+      {transactions.map(t => {
+        const isIncome = (t as any).amount < 0;
+        const name     = (t as any).merchant_clean ?? (t as any).merchant_raw ?? 'Unknown';
+        const entity   = (t as any).entity_id;
+
+        return (
+          <div class="flex items-center justify-between rounded-lg px-3 py-2.5 hover:bg-surface-hover group">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class={`h-7 w-7 flex-shrink-0 rounded-full flex items-center justify-center text-xs ${
+                isIncome ? 'bg-brand-green/10 text-brand-green' : 'bg-surface text-stone-400'
+              }`}>
+                {isIncome ? '↓' : '↑'}
+              </div>
+              <div class="min-w-0">
+                <p class="text-sm text-stone-700 truncate">{name}</p>
+                <div class="flex items-center gap-1.5 mt-0.5">
+                  <p class="text-xs text-stone-400">{(t as any).date}</p>
+                  {entity !== 'household' && (
+                    <span class="rounded border border-surface-border px-1 py-0.5 text-xs capitalize text-stone-400">{entity}</span>
+                  )}
+                  {Boolean((t as any).is_pending) && (
+                    <span class="rounded bg-brand-yellow/10 px-1 py-0.5 text-xs text-brand-yellow">pending</span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <span class={`text-sm font-medium tabular-nums flex-shrink-0 ml-3 ${isIncome ? 'text-brand-green' : 'text-stone-700'}`}>
+              {isIncome ? '+' : ''}{formatCurrency(Math.abs((t as any).amount))}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  )}
+</div>
