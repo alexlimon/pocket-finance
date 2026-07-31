@@ -174,9 +174,10 @@ const monthBaselines: DetailedBaseline[] = futureMonths.map(m => {
   // Expenses: checking bills + CC payment + cash expenses (non-income)
   const bills = resolvedBillsForMonth(m);
   const checkingBills = bills.filter(b => !b.isCc).reduce((s, b) => s + b.amount, 0);
-  const ccRecurring   = bills.filter(b =>  b.isCc).reduce((s, b) => s + b.amount, 0);
   const ccBudget      = summary ? Number(summary.cc_budget ?? 0) : 0;
-  const ccPayment     = ccBudget + ccRecurring;
+  // cc_budget holds the full statement total (variable + recurring already inside),
+  // so CC Payment = cc_budget.
+  const ccPayment     = ccBudget;
   const cashOut       = (cashByM[m] ?? []).filter(e => e.type === 'expense').reduce((s, e) => s + e.amount, 0);
   const expenses      = checkingBills + ccPayment + cashOut;
 
