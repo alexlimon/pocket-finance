@@ -598,7 +598,7 @@ const projection = projectCCSpend({
       <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
     </div>
   )}
-  <p class="mt-1 text-xs text-stone-400">Variable spend counts against budget and already includes big purchases (shown separately for tracking). Recurring subscriptions are separate.</p>
+  <p class="mt-1 text-xs text-stone-400">Variable spend is the full CC statement total (it already includes big purchases and recurring subscriptions, both shown separately for tracking).</p>
 </div>
 
 <!-- CC Recurring Subscriptions -->
@@ -667,7 +667,7 @@ const projection = projectCCSpend({
   </div>
 
   <p class="mt-2 text-xs text-stone-400">
-    Month label = billing month (when the charge hit the CC). Items auto-filtered to this payment cycle only. * = auto-checked (today &gt;= due date). These are included in the CC Payment amount in Fixed Bills above but do not count against the CC spending budget.
+    Month label = billing month (when the charge hit the CC). Items auto-filtered to this payment cycle only. * = auto-checked (today &gt;= due date). These subscriptions are part of the CC statement total (counted in the spending budget) and shown here for reconciliation tracking.
   </p>
 </div>
 
@@ -782,20 +782,19 @@ async function api(url: string, method: string, body: object) {
 function recomputeCC() {
   const budgetEl = document.getElementById('cc-budget-display') as HTMLElement;
   const budget    = parseFloat(budgetEl?.textContent?.replace(/[$,]/g,'') ?? '5000');
-  const recurring = parseFloat(budgetEl?.dataset.recurring ?? '0');
 
   let variableCC = 0;
   document.querySelectorAll<HTMLElement>('.var-spend-amount').forEach(el => {
     variableCC += parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
   });
-  const variableOnly = Math.max(0, variableCC - recurring);
+  const variableOnly = variableCC;  // full statement total — recurring is a breakdown, not subtracted
 
   let bigCC = 0;
   document.querySelectorAll('#big-cc-charges [data-cc-id]').forEach(row => {
     bigCC += parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
   });
 
-  // Ambient drives the bar and remaining; big purchases are already included in variableOnly
+  // Bar tracks the full statement total; big purchases are already included in variableCC
   const remaining = budget - variableOnly;
   const pct       = Math.min(variableOnly / budget * 100, 100);
   const bigPct    = Math.min(bigCC / budget * 100, Math.max(0, 100 - pct));

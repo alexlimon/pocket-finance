@@ -141,11 +141,16 @@ export function computeCCPayment(params: {
  * Computes the CC spending budget and tracker for this month's discretionary spending.
  *
  * Spending budget = next month's cc_budget (this month's spending will be paid next month).
+ * cc_budget holds the *full* prior-month statement total (variable + recurring + big),
+ * so the bar tracks that full total. The recurring component is returned as a
+ * breakdown-only figure (what portion of the spent total is subscriptions) and is
+ * NOT subtracted from the spent amount — that would leave a phantom "remaining"
+ * gap equal to the recurring total.
  *
  * The tracker shows:
- *   - ccVariableOnly: variable spend minus recurring subs (true discretionary)
- *   - ccBig:          big purchases
- *   - ccUsed:         ccVariableOnly + ccBig  (what counts against the budget)
+ *   - ccVariableOnly: full variable spend (includes recurring subs)
+ *   - ccBig:          big purchases (already inside ccVariableTotal)
+ *   - ccUsed:         ccVariableOnly  (what counts against the budget)
  *   - ccRemaining:    ccSpendBudget - ccUsed
  *
  * ccBillsNextPayment = subs billed this cycle, tracked in next month's bill_payments.
@@ -197,7 +202,7 @@ export function computeCCSpendingTracker(params: {
   // Per-card variable spend map (for display)
   const variableSpendMap  = new Map(variableSpendRows.map(r => [r.card, Number(r.amount)]));
   const ccVariableTotal   = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
-  const ccVariableOnly    = Math.max(0, ccVariableTotal - ccRecurringInVariable);
+  const ccVariableOnly    = ccVariableTotal;  // full statement total — recurring is a breakdown, not subtracted
   const ccBig             = bigPurchases.reduce((s, c) => s + c.amount, 0);
   const ccUsed            = ccVariableOnly;  // drives bar/pacing
   const ccTotalCharged    = ccVariableOnly;  // big purchases are already included in variable spend
