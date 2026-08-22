@@ -176,6 +176,7 @@ export function computeCCSpendingTracker(params: {
   ccVariableTotal:      number;
   ccVariableOnly:       number;
   ccBig:                number;
+  ccEstimated:          number;  // total of BIG PURCHASES flagged estimated (is_estimated=1) — these reserve budget but auto-expire when date < today
   ccUsed:               number;   // ambient-only (variableOnly), drives the bar/pacing
   ccTotalCharged:       number;   // variableOnly + big purchases, for display
   ccSpendBudget:        number;
@@ -204,9 +205,15 @@ export function computeCCSpendingTracker(params: {
   const ccVariableTotal   = [...variableSpendMap.values()].reduce((s, v) => s + v, 0);
   const ccVariableOnly    = ccVariableTotal;  // full statement total — recurring is a breakdown, not subtracted
   const ccBig             = bigPurchases.reduce((s, c) => s + c.amount, 0);
+  // Estimated big purchases reserve budget but are NOT counted in ccUsed (the swipe total).
+  // They auto-expire date-based in budget.astro's SQL filter; here we just sum what survived.
+  const ccEstimated       = bigPurchases
+    .filter(c => Number((c as any).is_estimated) === 1)
+    .reduce((s, c) => s + c.amount, 0);
   const ccUsed            = ccVariableOnly;  // drives bar/pacing
   const ccTotalCharged    = ccVariableOnly;  // big purchases are already included in variable spend
-  const ccRemaining       = ccSpendBudget - ccUsed;
+  // Remaining = budget − actual swipes − estimated big purchases (date-based, not yet swiped)
+  const ccRemaining       = ccSpendBudget - ccUsed - ccEstimated;
   const ccUsedPct         = Math.min((ccUsed / ccSpendBudget) * 100, 100);
 
   return {
@@ -220,6 +227,7 @@ export function computeCCSpendingTracker(params: {
     ccVariableTotal,
     ccVariableOnly,
     ccBig,
+    ccEstimated,
     ccUsed,
     ccTotalCharged,
     ccSpendBudget,
