@@ -940,6 +940,7 @@ interface Suggestions {
   baselineMonths: number;
   topMerchants:   { vendor: string; count: number; total: number }[];
   topPurchases:   CsvTransaction[];
+  otherPurchases: CsvTransaction[];
   otherCount:     number;
   otherTotal:     number;
   smallCount:     number;
@@ -1053,7 +1054,7 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
 
   return {
     month, total, txnCount: cur.length, baselineMonths: realMonths.length,
-    topMerchants, topPurchases, otherCount, otherTotal, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
+    topMerchants, topPurchases, otherPurchases: rest, otherCount, otherTotal, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
   };
 }
 
@@ -1065,6 +1066,7 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
   const [month, setMonth] = useState<string>('');
   const active = month || months[0] || '';
   const s = useMemo(() => active ? computeSuggestions(txns, active) : null, [txns, active]);
+  const [otherExpanded, setOtherExpanded] = useState(false);
 
   if (!txns.length) return <EmptyState message="No transaction data yet. Upload CSVs in the Upload tab." />;
   if (!s || s.txnCount === 0) return <EmptyState message="No purchases found for this month." />;
@@ -1191,13 +1193,27 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
                 </tr>
               ))}
               {s.otherCount > 0 && (
-                <tr>
-                  <td className="py-1.5 text-stone-400">51</td>
-                  <td className="py-1.5"></td>
-                  <td className="py-1.5 italic text-stone-500">Other ({s.otherCount} purchases)</td>
-                  <td className="py-1.5"></td>
-                  <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(s.otherTotal)}</td>
-                </tr>
+                <>
+                  <tr className="cursor-pointer hover:bg-stone-50" onClick={() => setOtherExpanded(v => !v)}>
+                    <td className="py-1.5 text-stone-400">51</td>
+                    <td className="py-1.5"></td>
+                    <td className="py-1.5 italic text-stone-500">
+                      <span className="mr-1 inline-block w-3 text-stone-400">{otherExpanded ? '▾' : '▸'}</span>
+                      Other ({s.otherCount} purchases)
+                    </td>
+                    <td className="py-1.5"></td>
+                    <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(s.otherTotal)}</td>
+                  </tr>
+                  {otherExpanded && s.otherPurchases.map((t, i) => (
+                    <tr key={t.id} className="bg-stone-50/50">
+                      <td className="py-1.5 text-stone-400">{i + 51}</td>
+                      <td className="whitespace-nowrap py-1.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
+                      <td className="max-w-[220px] truncate py-1.5 text-stone-700" title={t.description}>{t.description}</td>
+                      <td className="py-1.5 text-stone-500">{t.category ?? '—'}</td>
+                      <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
+                    </tr>
+                  ))}
+                </>
               )}
             </tbody>
           </table>
