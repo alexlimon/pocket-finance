@@ -59,35 +59,37 @@ let ccBudgetSummaries: { month: string; cc_budget: number }[] = [];
 let ccPaceMonthTotals: { month: string; total: number }[]    = [];
 
 try {
-  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes] = await Promise.all([
-    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] }),
-    client.execute({ sql: BILLS_QUERY, args: [month, month, month] }),
+  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes] = await client.batch([
+    { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] },
+    { sql: BILLS_QUERY, args: [month, month, month] },
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
-    client.execute({
+    // Estimated big purchases (is_estimated = 1) auto-expire once their date passes — exclude those.
+    {
       sql: `SELECT cc.*, cs.billing_end_day, cs.payment_day
             FROM cc_charges cc
             LEFT JOIN cc_settings cs ON cc.card = cs.card
             WHERE cc.month = ? AND cc.is_big_purchase = 1
+              AND NOT (cc.is_estimated = 1 AND cc.date IS NOT NULL AND cc.date < date('now'))
             ORDER BY cc.date ASC NULLS LAST, cc.amount DESC`,
       args: [month],
-    }),
-    client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month = ? ORDER BY date ASC', args: [month] }),
-    client.execute("SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card"),
+    },
+    { sql: 'SELECT * FROM cash_expenses WHERE month = ? ORDER BY date ASC', args: [month] },
+    { sql: "SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card", args: [] },
     // Previous month — propagate balances forward when this month has no DB record yet
-    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [prev] }),
-    client.execute({ sql: 'SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card', args: [month] }),
+    { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [prev] },
+    { sql: 'SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card', args: [month] },
     // Next month — its cc_budget is THIS month's CC spending budget (payment-month convention)
-    client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] }),
+    { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] },
     // Next month CC bills — subs charged this cycle are tracked in next month's bill_payments
-    client.execute({ sql: CC_BILLS_QUERY, args: [next, next, next] }),
+    { sql: CC_BILLS_QUERY, args: [next, next, next] },
     // Saved est/actual toggle for this month
-    client.execute({ sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] }),
+    { sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] },
     // Plaid sync error from background sync (set by syncCCSpend when token invalid)
-    client.execute({ sql: `SELECT value FROM settings WHERE key = 'plaid_sync_error' LIMIT 1`, args: [] }),
+    { sql: `SELECT value FROM settings WHERE key = 'plaid_sync_error' LIMIT 1`, args: [] },
     // CC budget baseline — last 12 months with non-zero cc_budget
-    client.execute({ sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [month] }),
+    { sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
     // CC pace baseline — last 6 months of variable spend totals
-    client.execute({ sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [month] }),
+    { sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -164,7 +166,7 @@ const balances = computeBalances(summary, cashFlow.netAmount);
 // Destructure for template use
 const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
 const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
-        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccUsed, ccTotalCharged, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
+        variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccEstimated, ccUsed, ccTotalCharged, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
@@ -202,6 +204,10 @@ const bigPurchasesTotal = bigPurchases.reduce((s, c) => s + c.amount, 0);
 // Big purchases as % of budget (capped so ambient + big segments don't overflow)
 const ccBigPct = ccSpendBudget > 0
   ? Math.min((ccBig / ccSpendBudget) * 100, Math.max(0, 100 - ccUsedPct))
+  : 0;
+// Estimated big purchases: reserved slice of the bar (dashed pink, sits after the gray big bar)
+const ccEstimatedPct = ccSpendBudget > 0
+  ? Math.min((ccEstimated / ccSpendBudget) * 100, Math.max(0, 100 - ccUsedPct - ccBigPct))
   : 0;
 const projection = projectCCSpend({
   ccUsed:            ccVariableOnly,  // ambient-only for projection rate
@@ -389,7 +395,7 @@ const projection = projectCCSpend({
           <div class="flex items-center gap-1 flex-shrink-0">
             <span class={`editable-bill-amount tabular-nums text-sm cursor-pointer rounded px-1.5 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
               data-bill={b.id} data-month={month} data-is-cc="0">{fmt(b.actual_amount)}</span>
-            <button class="skip-bill opacity-0 group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-1 transition-opacity"
+            <button class="skip-bill opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-1 transition-opacity"
               data-bill={b.id} data-month={month} title="Skip this month">✕</button>
           </div>
         </div>
@@ -432,7 +438,7 @@ const projection = projectCCSpend({
         <span class={`tabular-nums flex-shrink-0 font-medium ${(e as any).type==='income' ? 'text-brand-green' : 'text-stone-700'}`}>
           {(e as any).type === 'income' ? '+' : ''}{fmt(e.amount)}
         </span>
-        <button class="delete-cash opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={e.id}>✕</button>
+        <button class="delete-cash opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={e.id}>✕</button>
       </div>
     ))}
   </div>
@@ -460,7 +466,7 @@ const projection = projectCCSpend({
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 
 <!-- CC Variable Spend (one row per card) -->
-<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Variable Spend</h2>
     <a href="/connect" class="text-xs text-stone-400 hover:text-stone-500">Edit billing dates</a>
@@ -509,7 +515,7 @@ const projection = projectCCSpend({
 </div>
 
 <!-- CC Budget Bar -->
-<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
   <div class="flex flex-wrap items-start justify-between gap-4 mb-3">
     <div>
       <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400 mb-1">Credit Card Spending Budget</h2>
@@ -528,14 +534,27 @@ const projection = projectCCSpend({
     <div class="flex gap-4 text-right text-sm">
       <div><p class="text-xs text-stone-400">Variable</p><p class="tabular-nums text-stone-600" id="cc-variable-val2">{fmt(ccVariableOnly)}</p></div>
       <div><p class="text-xs text-stone-400">incl. Big Purchases</p><p class="tabular-nums text-stone-500" id="cc-big-val">{fmt(ccBig)}</p></div>
+      {ccEstimated > 0 && (
+        <div><p class="text-xs text-stone-400">Estimated (reserved)</p><p class="tabular-nums text-pink-500" id="cc-estimated-val">−{fmt(ccEstimated)}</p></div>
+      )}
     </div>
   </div>
   <div class="h-2 rounded-full bg-surface overflow-hidden flex gap-0">
-    <div id="cc-bar" class={`h-full transition-all ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
+    <div id="cc-bar" class={`h-full ${ccUsedPct>=100?'bg-brand-red':ccUsedPct>=80?'bg-brand-yellow':'bg-brand-green'}`}
       style={`width:${ccUsedPct.toFixed(1)}%`}></div>
-    <div id="cc-bar-big" class="h-full bg-stone-300 transition-all"
+    <div id="cc-bar-big" class="h-full bg-stone-300"
       style={`width:${ccBigPct.toFixed(1)}%`} title="Big purchases (not counted against budget)"></div>
+    {ccEstimated > 0 && (
+      <div id="cc-bar-estimated" class="h-full"
+        style={`width:${ccEstimatedPct.toFixed(1)}%; background: repeating-linear-gradient(45deg, #ec4899, #ec4899 3px, #f9a8d4 3px, #f9a8d4 6px);`}
+        title="Estimated big purchases (reserved)"></div>
+    )}
   </div>
+  {ccEstimated > 0 && (
+    <p class="mt-1 text-xs text-pink-500">
+      {fmt(ccEstimated)} reserved for estimated big purchases — auto-expires when date passes.
+    </p>
+  )}
   <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400"
     id="cc-pacing-row"
     data-pacing-total-days={pacingTotalDays}
@@ -602,7 +621,7 @@ const projection = projectCCSpend({
 </div>
 
 <!-- CC Recurring Subscriptions -->
-<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4"
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto"
   id="cc-recurring-section"
   data-estimated={estimatedCCRecurring}
   data-actual={actualCCRecurring}
@@ -658,7 +677,7 @@ const projection = projectCCSpend({
             <span class="match-hint hidden text-xs text-emerald-600 tabular-nums" data-bill-match={b.id}></span>
             <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
               data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
-            <button class="cc-sub-skip opacity-0 group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
+            <button class="cc-sub-skip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
               data-bill-id={b.id} data-month={next} title="Skip this sub for this month">✕</button>
           </div>
         </div>
@@ -672,10 +691,10 @@ const projection = projectCCSpend({
 </div>
 
 <!-- Big Purchases -->
-<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4">
+<div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Big Purchases</h2>
-    <span class="text-xs text-stone-400">Tracked separately · not counted against budget</span>
+    <span class="text-xs text-stone-400">Estimated (🪄) reserves budget · clears when date passes</span>
   </div>
 
   <div id="big-cc-charges" class="space-y-3 mb-4">
@@ -694,8 +713,12 @@ const projection = projectCCSpend({
             <span class="big-group-total tabular-nums text-xs font-medium text-stone-600">{fmt(groupTotal)}</span>
           </div>
           <div class="big-charges-body divide-y divide-surface-border">
-            {charges.map(c => (
-              <div class="flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm" data-cc-id={c.id}>
+            {charges.map(c => {
+              const isEst = Number((c as any).is_estimated) === 1;
+              return (
+              <div class={`flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm ${isEst ? 'bg-pink-50/40' : ''}`}
+                style={isEst ? 'border-left:2px solid #ec4899;' : ''}
+                data-cc-id={c.id} data-is-estimated={isEst ? '1' : '0'}>
                 <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">{c.date??'—'}</span>
                 <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id={c.id}>
                   {ccSettings.map(s=><option value={s.card} selected={c.card===s.card}>{s.display_name}</option>)}
@@ -709,11 +732,18 @@ const projection = projectCCSpend({
                   ))}
                 </select>
                 <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id={c.id}>{c.description}</span>
+                {isEst && (
+                  <span class="text-[10px] uppercase tracking-wide bg-pink-100 text-pink-600 rounded px-1 py-0.5 flex-shrink-0" title="Estimated — reserves budget, auto-expires when date passes">🪄 est</span>
+                )}
                 <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id={c.id}>{fmt(c.amount)}</span>
-                <button class="cc-toggle-big opacity-0 group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id={c.id} data-big="1" title="Move to Variable">↑</button>
-                <button class="delete-cc-charge opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={c.id}>✕</button>
+                {isEst && (
+                  <button class="cc-toggle-estimated opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1 text-pink-500 hover:text-pink-700" data-id={c.id} data-est="1" title="Mark as actually purchased (removed from estimated)">✓</button>
+                )}
+                <button class="cc-toggle-big opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id={c.id} data-big="1" title="Move to Variable">↑</button>
+                <button class="delete-cc-charge opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={c.id}>✕</button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       );
@@ -747,6 +777,13 @@ const projection = projectCCSpend({
     <div class="flex flex-col gap-1">
       <label class="text-xs text-stone-400">Amount</label>
       <input name="amount" type="number" step="0.01" placeholder="0.00" required class="w-24 rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-sm text-stone-800 tabular-nums focus:border-brand-green focus:outline-none" />
+    </div>
+    <div class="flex flex-col gap-1">
+      <label class="text-xs text-stone-400 invisible">x</label>
+      <label class="flex items-center gap-1.5 text-xs text-pink-600 cursor-pointer select-none" title="Future purchase estimated to land — reserves budget, auto-expires when date passes">
+        <input name="is_estimated" type="checkbox" class="h-3.5 w-3.5 rounded border-stone-300 accent-pink-500" />
+        🪄 Estimated
+      </label>
     </div>
     <div class="flex flex-col gap-1">
       <label class="text-xs text-stone-400 invisible">x</label>
@@ -790,14 +827,19 @@ function recomputeCC() {
   const variableOnly = variableCC;  // full statement total — recurring is a breakdown, not subtracted
 
   let bigCC = 0;
+  let estCC = 0;
   document.querySelectorAll('#big-cc-charges [data-cc-id]').forEach(row => {
-    bigCC += parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
+    const amt = parseFloat(row.querySelector('.editable-cc-amount')?.textContent?.replace(/[$,]/g,'') ?? '0');
+    bigCC += amt;
+    if (row.getAttribute('data-is-estimated') === '1') estCC += amt;
   });
 
-  // Bar tracks the full statement total; big purchases are already included in variableCC
-  const remaining = budget - variableOnly;
+  // Bar tracks the full statement total; big purchases are already included in variableCC.
+  // Estimated big purchases reserve budget (subtracted from remaining) but are NOT in the swipe total.
+  const remaining = budget - variableOnly - estCC;
   const pct       = Math.min(variableOnly / budget * 100, 100);
   const bigPct    = Math.min(bigCC / budget * 100, Math.max(0, 100 - pct));
+  const estPct    = Math.min(estCC / budget * 100, Math.max(0, 100 - pct - bigPct));
 
   const remEl = document.getElementById('cc-remaining-val');
   if (remEl) {
@@ -807,10 +849,24 @@ function recomputeCC() {
   const varEl = document.getElementById('cc-variable-val'); if (varEl) varEl.textContent = usd(variableOnly);
   const varEl2 = document.getElementById('cc-variable-val2'); if (varEl2) varEl2.textContent = usd(variableOnly);
   const bigEl = document.getElementById('cc-big-val');       if (bigEl) bigEl.textContent = usd(bigCC);
+  const estEl = document.getElementById('cc-estimated-val'); if (estEl) estEl.textContent = '−' + usd(estCC);
   const bar    = document.getElementById('cc-bar') as HTMLElement;
   const barBig = document.getElementById('cc-bar-big') as HTMLElement;
   if (bar) { bar.style.width = pct.toFixed(1)+'%'; bar.className = bar.className.replace(/bg-brand-\w+/g,'')+(pct>=100?' bg-brand-red':pct>=80?' bg-brand-yellow':' bg-brand-green'); }
   if (barBig) barBig.style.width = bigPct.toFixed(1)+'%';
+  let barEst = document.getElementById('cc-bar-estimated') as HTMLElement | null;
+  if (estCC > 0) {
+    if (!barEst) {
+      barEst = document.createElement('div');
+      barEst.id = 'cc-bar-estimated';
+      barEst.className = 'h-full';
+      barEst.style.background = "repeating-linear-gradient(45deg, #ec4899, #ec4899 3px, #f9a8d4 3px, #f9a8d4 6px)";
+      barBig?.parentElement?.appendChild(barEst);
+    }
+    barEst.style.width = estPct.toFixed(1)+'%';
+  } else if (barEst) {
+    barEst.remove();
+  }
 
   // Pacing row — measures ambient pace only
   const pacingRow = document.getElementById('cc-pacing-row') as HTMLElement | null;
@@ -1313,6 +1369,26 @@ document.querySelectorAll<HTMLButtonElement>('.cc-toggle-big').forEach(btn => {
   });
 });
 
+// ── Toggle estimated → purchased ─────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.cc-toggle-estimated').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const id = btn.dataset.id!;
+    try {
+      await api('/api/budget/cc-charge','PATCH',{id, is_estimated:false});
+      const row = btn.closest('[data-cc-id]') as HTMLElement;
+      // Remove estimated styling + badge, then drop the toggle button itself
+      row.style.borderLeft = '';
+      row.classList.remove('bg-pink-50/40');
+      row.removeAttribute('data-is-estimated');
+      row.dataset.isEstimated = '0';
+      const badge = row.querySelector('.bg-pink-100');
+      badge?.remove();
+      btn.remove();
+      recomputeCC();
+    } catch { alert('Update failed'); }
+  });
+});
+
 // ── Delete CC charge ──────────────────────────────────────────────────────────
 document.querySelectorAll<HTMLButtonElement>('.delete-cc-charge').forEach(btn => {
   btn.addEventListener('click', async () => {
@@ -1361,9 +1437,10 @@ addBigForm?.addEventListener('submit', async e => {
   const date=String(data.get('date')??'').trim(), card=String(data.get('card')),
         category_id=String(data.get('category_id')??'').trim()||null,
         desc=String(data.get('description')??'').trim(), amount=parseFloat(String(data.get('amount')));
+  const isEstimated = !!data.get('is_estimated');
   if (!date||!desc||isNaN(amount)) return;
   try {
-    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true,category_id}) as {id:string;payment_month:string|null};
+    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true,is_estimated:isEstimated,category_id}) as {id:string;payment_month:string|null};
     const pm = res.payment_month ?? 'unknown';
     const {pmFmt} = payMonthFor(date, card);
     const container = document.getElementById('big-cc-charges')!;
@@ -1389,15 +1466,22 @@ addBigForm?.addEventListener('submit', async e => {
       Object.entries(BIG_CAT_LABELS).map(([id,lbl])=>`<option value="${id}"${id===category_id?' selected':''} style="color:${BIG_CAT_COLORS[id]}">${lbl}</option>`).join('');
     const row = document.createElement('div');
     row.dataset.ccId = res.id;
-    row.className = 'flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm';
+    row.dataset.isEstimated = isEstimated ? '1' : '0';
+    const rowBg = isEstimated ? 'bg-pink-50/40' : '';
+    const estBadge = isEstimated
+      ? `<span class="text-[10px] uppercase tracking-wide bg-pink-100 text-pink-600 rounded px-1 py-0.5 flex-shrink-0" title="Estimated — reserves budget, auto-expires when date passes">🪄 est</span>` : '';
+    row.className = `flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm ${rowBg}`;
+    row.style.borderLeft = isEstimated ? '2px solid #ec4899' : '';
     row.innerHTML = `
       <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">${date}</span>
       <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id="${res.id}">${cardOptions}</select>
       <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium flex-shrink-0" data-id="${res.id}" style="color:${catColor}">${catOptions}</select>
       <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id="${res.id}">${desc}</span>
+      ${estBadge}
       <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id="${res.id}">${usd(amount)}</span>
-      <button class="cc-toggle-big opacity-0 group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id="${res.id}" data-big="1" title="Move to Variable">↑</button>
-      <button class="delete-cc-charge opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
+      ${isEstimated ? `<button class="cc-toggle-estimated opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1 text-pink-500 hover:text-pink-700" data-id="${res.id}" data-est="1" title="Mark as actually purchased (removed from estimated)">✓</button>` : ''}
+      <button class="cc-toggle-big opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1 text-stone-400 hover:text-stone-600" data-id="${res.id}" data-big="1" title="Move to Variable">↑</button>
+      <button class="delete-cc-charge opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
     `;
     groupEl.querySelector('.big-charges-body')!.appendChild(row);
     const tot = groupEl.querySelector('.big-group-total');
@@ -1469,7 +1553,7 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
         <span class="flex-1 text-stone-700 truncate">${desc}</span>
         ${entity_id!=='household'?`<span class="rounded border border-surface-border px-1.5 py-0.5 text-xs capitalize text-stone-400 flex-shrink-0">${entity_id}</span>`:''}
         <span class="tabular-nums flex-shrink-0 font-medium ${isIncome?'text-brand-green':'text-stone-700'}">${isIncome?'+':''}${usd(amt)}</span>
-        <button class="delete-cash opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
+        <button class="delete-cash opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
       `;
       list.appendChild(row);
       row.querySelector('.delete-cash')?.addEventListener('click',async()=>{await fetch(`/api/budget/cash-expense?id=${res.id}`,{method:'DELETE'});row.remove();});
