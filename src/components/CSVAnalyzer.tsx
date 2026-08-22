@@ -940,6 +940,8 @@ interface Suggestions {
   baselineMonths: number;
   topMerchants:   { vendor: string; count: number; total: number }[];
   topPurchases:   CsvTransaction[];
+  otherCount:     number;
+  otherTotal:     number;
   smallCount:     number;
   smallTotal:     number;
   weekendShare:   number;
@@ -975,7 +977,11 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
   }));
   const topMerchants = [...merchants].sort((a, b) => b.total - a.total).slice(0, 6);
 
-  const topPurchases = [...cur].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 50);
+  const byAmount = [...cur].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount));
+  const topPurchases = byAmount.slice(0, 50);
+  const rest = byAmount.slice(50);
+  const otherCount = rest.length;
+  const otherTotal = rest.reduce((s, t) => s + Math.abs(t.amount), 0);
 
   const curByCat = new Map<string, number>();
   for (const t of cur) curByCat.set(t.category || 'Other', (curByCat.get(t.category || 'Other') ?? 0) + Math.abs(t.amount));
@@ -1047,7 +1053,7 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
 
   return {
     month, total, txnCount: cur.length, baselineMonths: realMonths.length,
-    topMerchants, topPurchases, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
+    topMerchants, topPurchases, otherCount, otherTotal, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
   };
 }
 
@@ -1184,6 +1190,15 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
                   <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
                 </tr>
               ))}
+              {s.otherCount > 0 && (
+                <tr>
+                  <td className="py-1.5 text-stone-400">51</td>
+                  <td className="py-1.5"></td>
+                  <td className="py-1.5 italic text-stone-500">Other ({s.otherCount} purchases)</td>
+                  <td className="py-1.5"></td>
+                  <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(s.otherTotal)}</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
