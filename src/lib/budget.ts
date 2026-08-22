@@ -19,6 +19,19 @@ export function bigPurchaseCategoryColor(id: string | null | undefined): string 
   return BIG_PURCHASE_CATEGORIES.find(c => c.id === id)?.color ?? '#a8a29e'; // stone-400 fallback
 }
 
+/**
+ * `settings` key prefix marking a month's cc_budget as hand-set.
+ *
+ * cc_budget has two writers: the user (a planned budget) and syncCCSpend's
+ * reconciler (the closed statement total, re-derived from cc_variable_spend on
+ * every page load). Without a record of intent the reconciler wins every time and
+ * manual edits appear not to save. Writing `<prefix><month>` = '1' latches the
+ * month so the reconciler skips it — the same contract statement_balance gives
+ * cc_variable_spend.amount. Stored in `settings` rather than a monthly_summary
+ * column to avoid a schema migration.
+ */
+export const CC_BUDGET_LATCH_PREFIX = 'cc_budget_manual_';
+
 export interface MonthlySummary {
   month:           string;
   income_alex:     number;
@@ -70,6 +83,7 @@ export interface CCCharge {
   amount:          number;
   card:            string;
   is_big_purchase: number;
+  is_estimated:    number;   // 1 = future/estimated — reserves budget, auto-expires when date < today
   category_id:     string | null;
 }
 
