@@ -939,6 +939,7 @@ interface Suggestions {
   txnCount:       number;
   baselineMonths: number;
   topMerchants:   { vendor: string; count: number; total: number }[];
+  topPurchases:   CsvTransaction[];
   smallCount:     number;
   smallTotal:     number;
   weekendShare:   number;
@@ -973,6 +974,8 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
     total:  rows.reduce((s, t) => s + Math.abs(t.amount), 0),
   }));
   const topMerchants = [...merchants].sort((a, b) => b.total - a.total).slice(0, 6);
+
+  const topPurchases = [...cur].sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)).slice(0, 50);
 
   const curByCat = new Map<string, number>();
   for (const t of cur) curByCat.set(t.category || 'Other', (curByCat.get(t.category || 'Other') ?? 0) + Math.abs(t.amount));
@@ -1045,7 +1048,7 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
 
   return {
     month, total, txnCount: cur.length, baselineMonths: realMonths.length,
-    topMerchants, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
+    topMerchants, topPurchases, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
   };
 }
 
@@ -1156,6 +1159,35 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
             </li>
           ))}
         </ul>
+      </div>
+
+      {/* Top 50 purchases */}
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top 50 purchases this month</p>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-stone-100 text-xs text-stone-400">
+                <th className="py-1.5 text-left font-medium">#</th>
+                <th className="py-1.5 text-left font-medium">Date</th>
+                <th className="py-1.5 text-left font-medium">Description</th>
+                <th className="py-1.5 text-left font-medium">Category</th>
+                <th className="py-1.5 text-right font-medium">Amount</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-stone-100">
+              {s.topPurchases.map((t, i) => (
+                <tr key={t.id}>
+                  <td className="py-1.5 text-stone-400">{i + 1}</td>
+                  <td className="whitespace-nowrap py-1.5 tabular-nums text-stone-500">{fmtDate(t.date)}</td>
+                  <td className="max-w-[220px] truncate py-1.5 text-stone-700" title={t.description}>{t.description}</td>
+                  <td className="py-1.5 text-stone-500">{t.category ?? '—'}</td>
+                  <td className="py-1.5 text-right tabular-nums font-medium text-stone-800">{fmt(Math.abs(t.amount))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
