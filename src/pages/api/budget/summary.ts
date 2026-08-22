@@ -1,7 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
-import { nextMonth } from '../../../lib/budget';
+import { nextMonth, CC_BUDGET_LATCH_PREFIX } from '../../../lib/budget';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -40,6 +40,15 @@ export async function POST(context: APIContext): Promise<Response> {
       sql:  `UPDATE monthly_summary SET ${sets.join(', ')} WHERE month = ?`,
       args: [...args, month],
     });
+
+    // An explicit cc_budget edit latches the month so syncCCSpend's reconciler
+    // stops re-deriving it from cc_variable_spend on every page load.
+    if ('cc_budget' in body) {
+      await client.execute({
+        sql:  `INSERT OR REPLACE INTO settings (key, value) VALUES (?, '1')`,
+        args: [`${CC_BUDGET_LATCH_PREFIX}${month}`],
+      });
+    }
 
     // Propagate end balances to next month's start balances
     if ('checking_after' in body || 'savings_after' in body) {

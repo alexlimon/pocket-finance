@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { CC_BUDGET_LATCH_PREFIX } from '../../../lib/budget';
 
 const ALLOWED = new Set(['income_alex', 'income_maham', 'cc_budget']);
 
@@ -28,6 +29,18 @@ export async function POST(context: APIContext): Promise<Response> {
       sql:  `UPDATE monthly_summary SET ${field} = ? WHERE month > ?`,
       args: [Number(value), from_month],
     });
+
+    // Propagating cc_budget latches every month it touched, otherwise syncCCSpend
+    // reconciles the closed ones straight back to their statement totals.
+    if (field === 'cc_budget') {
+      await client.execute({
+        sql:  `INSERT OR REPLACE INTO settings (key, value)
+               SELECT '${CC_BUDGET_LATCH_PREFIX}' || month, '1'
+               FROM monthly_summary WHERE month > ?`,
+        args: [from_month],
+      });
+    }
+
     return json({ ok: true, rows_updated: result.rowsAffected });
   } finally { client.close(); }
 }

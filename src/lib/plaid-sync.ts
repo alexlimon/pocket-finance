@@ -1,5 +1,6 @@
 import { getClient } from './db';
 import { getAccounts, getInstitutionName } from './plaid';
+import { CC_BUDGET_LATCH_PREFIX } from './budget';
 
 const CARD_MAP: { match: (n: string) => boolean; card: string }[] = [
   { match: (n) => n.includes('Ultimate Rewards') || n.includes('Sapphire'), card: 'sapphire' },
@@ -245,11 +246,31 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
     // cc_budget. We use the calendar cut-off (not the statement_balance
     // snapshot) as the closed signal so months whose snapshot was never
     // written (Plaid down during the close window) still reconcile.
+    //
+    // Two guards keep this from destroying user input:
+    //   1. every card in the billing month must be closed (partial sums are not
+    //      the month's statement total), and
+    //   2. the payment month must not be latched (see CC_BUDGET_LATCH_PREFIX).
     const spendRes = await client.execute({
       sql:  'SELECT month, card, amount FROM cc_variable_spend WHERE amount > 0',
       args: [],
     });
-    const totalsByBillingMonth = new Map<string, number>();
+    // Months whose cc_budget was set by hand. An explicit edit latches the month
+    // and the reconciler leaves it alone from then on — the same contract the
+    // statement_balance latch gives `amount` above.
+    const latchedRes = await client.execute({
+      sql:  `SELECT key FROM settings WHERE key LIKE '${CC_BUDGET_LATCH_PREFIX}%' AND value = '1'`,
+      args: [],
+    });
+    const latchedMonths = new Set(
+      latchedRes.rows.map(r => String(r.key).slice(CC_BUDGET_LATCH_PREFIX.length))
+    );
+
+    // A billing month is final only once EVERY card carrying spend is past its own
+    // cut-off. Cards close on different days (sapphire 18th, prime 23rd), so summing
+    // whichever happened to close first would publish a single-card subtotal as the
+    // whole month's statement total — and then silently revise it days later.
+    const byBillingMonth = new Map<string, { total: number; allClosed: boolean }>();
     for (const r of spendRes.rows) {
       const card   = String(r.card);
       const bMonth = String(r.month);
@@ -257,15 +278,18 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
       if (!s) continue;
       const [y, m] = bMonth.split('-').map(Number);
       const closeDate = new Date(y, m - 1, s.billing_end_day);
-      if (today < closeDate) continue; // statement still open — not final yet
-      totalsByBillingMonth.set(bMonth, (totalsByBillingMonth.get(bMonth) ?? 0) + (Number(r.amount) || 0));
+      const entry = byBillingMonth.get(bMonth) ?? { total: 0, allClosed: true };
+      entry.total += Number(r.amount) || 0;
+      if (today < closeDate) entry.allClosed = false; // statement still open — not final yet
+      byBillingMonth.set(bMonth, entry);
     }
 
-    for (const [billingMonth, total] of totalsByBillingMonth) {
-      if (total <= 0) continue;
+    for (const [billingMonth, { total, allClosed }] of byBillingMonth) {
+      if (!allClosed || total <= 0) continue;
       const [y, m] = billingMonth.split('-').map(Number);
       const payDate = new Date(y, m, 1); // m is 1-indexed → JS month=m wraps to next calendar month
       const paymentMonth = `${payDate.getFullYear()}-${String(payDate.getMonth() + 1).padStart(2, '0')}`;
+      if (latchedMonths.has(paymentMonth)) continue; // user set this budget by hand
 
       await client.execute({
         sql:  `INSERT INTO monthly_summary (month, cc_budget) VALUES (?, ?) ON CONFLICT(month) DO NOTHING`,
