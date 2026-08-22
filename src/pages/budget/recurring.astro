@@ -104,7 +104,7 @@ function fmt(n: number) {
                   data-id={item.id}
                   title="Create payment records for all months in the date range"
                 >Propagate</button>
-                <button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={item.id}>✕</button>
+                <button class="delete-btn opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id={item.id}>✕</button>
               </div>
             </td>
           </tr>
@@ -315,7 +315,7 @@ document.getElementById('add-recurring-form')?.addEventListener('submit', async 
       <td class="px-4 py-2.5"><select class="entity-select rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}"><option value="household"${body.entity_id==='household'?' selected':''}>Household</option><option value="kirby"${body.entity_id==='kirby'?' selected':''}>Kirby</option><option value="kennedy"${body.entity_id==='kennedy'?' selected':''}>Kennedy</option></select></td>
       <td class="px-4 py-2.5"><input type="date" class="start-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}" value="${body.start_month?body.start_month+'-01':''}" /></td>
       <td class="px-4 py-2.5"><input type="date" class="end-month-input rounded border border-surface-border bg-surface px-2 py-1 text-xs text-stone-600 w-full" data-id="${res.id}" value="${body.end_month?body.end_month+'-01':''}" /></td>
-      <td class="px-4 py-2.5 text-right"><div class="flex items-center justify-end gap-2"><button class="propagate-btn rounded-lg border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 text-xs text-brand-green hover:bg-brand-green/20 font-medium" data-id="${res.id}">Propagate</button><button class="delete-btn opacity-0 group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button></div></td>
+      <td class="px-4 py-2.5 text-right"><div class="flex items-center justify-end gap-2"><button class="propagate-btn rounded-lg border border-brand-green/40 bg-brand-green/10 px-2.5 py-1 text-xs text-brand-green hover:bg-brand-green/20 font-medium" data-id="${res.id}">Propagate</button><button class="delete-btn opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button></div></td>
     `;
     tbody.appendChild(tr);
     form.reset();
