@@ -1,0 +1,16 @@
+{
+  "name": "Money Magic ✨",
+  "short_name": "Magic",
+  "description": "Quick ✨sparkly✨ check on how the household is doing.",
+  "start_url": "/wife",
+  "scope": "/wife",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ffe4ef",
+  "theme_color": "#ffd1dc",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
