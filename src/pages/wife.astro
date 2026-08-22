@@ -1,0 +1,202 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { verifySession } from '../lib/auth';
+import { getClient } from '../lib/db';
+import { fmt, nextMonth, currentMonth } from '../lib/budget';
+
+const env = Astro.locals.runtime.env;
+if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
+
+const client = getClient(env);
+
+// Determine the ACTIVE billing cycle month (the statement currently being swiped).
+// Convention: if today's day < billing_end_day, the active cycle is this calendar
+// month's statement (it hasn't closed yet). Otherwise the statement just closed
+// and we're now in the next cycle. Uses the 'sapphire' card's billing_end_day
+// (falling back to 25) — same anchor as /budget.
+const todayDay = new Date().getDate();
+let ccSpendBudget: number;
+let ccUsed:       number;
+let ccRemaining: number;
+let estimatedReserved = 0;
+let cycleEndLabel: string;
+
+try {
+  const [settingsRes] = await client.batch([
+    { sql: "SELECT billing_end_day FROM cc_settings WHERE card = 'sapphire' LIMIT 1", args: [] },
+  ]);
+  const billingEndDay = settingsRes.rows.length
+    ? Number((settingsRes.rows[0] as any).billing_end_day) || 25
+    : 25;
+
+  // Active cycle month: the statement currently accumulating charges.
+  const thisCal = currentMonth();
+  const activeMonth = todayDay < billingEndDay ? thisCal : nextMonth(thisCal);
+  const budgetMonth = nextMonth(activeMonth);  // paid in the month after it closes
+
+  const [varRes, sumRes, nextSumRes, estRes] = await client.batch([
+    { sql: 'SELECT COALESCE(SUM(amount),0) AS total FROM cc_variable_spend WHERE month = ?',  args: [activeMonth] },
+    { sql: 'SELECT cc_budget FROM monthly_summary WHERE month = ? LIMIT 1',                  args: [activeMonth] },
+    { sql: 'SELECT cc_budget FROM monthly_summary WHERE month = ? LIMIT 1',                  args: [budgetMonth] },
+    // Estimated big purchases that are still in the future (date >= today) — these reserve budget
+    { sql: `SELECT COALESCE(SUM(amount),0) AS total FROM cc_charges
+            WHERE month = ? AND is_big_purchase = 1 AND is_estimated = 1
+              AND date IS NOT NULL AND date >= date('now')`, args: [activeMonth] },
+  ]);
+
+  const currentCCBudget   = sumRes.rows.length    ? Number((sumRes.rows[0] as any).cc_budget)    || 5000 : 5000;
+  const budgetMonthVal    = nextSumRes.rows.length ? Number((nextSumRes.rows[0] as any).cc_budget) || null : null;
+  const estimatedReserved = Number((estRes.rows[0] as any).total) || 0;
+  ccSpendBudget = budgetMonthVal ?? currentCCBudget;
+  ccUsed       = Number((varRes.rows[0] as any).total) || 0;
+  ccRemaining  = ccSpendBudget - ccUsed - estimatedReserved;
+
+  // Human label for cycle end, e.g. "Aug 18"
+  const [y, m] = activeMonth.split('-').map(Number);
+  const cycleEndDate = new Date(y, m - 1, billingEndDay);
+  cycleEndLabel = cycleEndDate.toLocaleString('en-US', { month: 'short', day: 'numeric' });
+} finally {
+  client.close();
+}
+
+// Status: green = plenty left, yellow = getting close, red = over
+const pct = ccSpendBudget > 0 ? (ccUsed / ccSpendBudget) * 100 : 100;
+const light = ccRemaining < 0 ? 'red' : pct >= 80 ? 'yellow' : 'green';
+
+const statusHeadline = {
+  green:  "✨ Gringotts is happy ✨",
+  yellow: "🦉 An owl is coming 🦉",
+  red:    "🚨 Mischief detected 🚨",
+}[light];
+const statusSub = {
+  green:  "Vault's glowing — go ahead and treat yourself.",
+  yellow: "Budget's getting cozy. One moreTarget run, maybe.",
+  red:    ccRemaining < 0
+    ? "We overspent this cycle. Hide the wand for now."
+    : "Running hotter than a Hungarian Horntail. Slow the broom.",
+}[light];
+
+const orbClass = {
+  green:  'bg-pink-400',
+  yellow: 'bg-amber-400',
+  red:    'bg-rose-500',
+}[light];
+
+const monthName = new Date().toLocaleString('en-US', { month: 'long' });
+
+// Daily joke rotation (spongebob-tier stupidity)
+const jokes = [
+  { q: "Why did SpongeBob bring a ladder to the bank?", a: "To reach his high interest!" },
+  { q: "What's a wizard's favorite type of payment?",  a: "Gringotts — it's a vault-y good time." },
+  { q: "Why don't books ever go broke?",               a: "Because they always come with a cover!" },
+  { q: "What did Dobby say about the budget?",         a: "\"Dobby is a free galleon!\"" },
+  { q: "Why was the math book sad?",                    a: "It had too many problems. Like our bank." },
+  { q: "What's Hermione's favorite account?",          a: "The checking one — she always double-checks it." },
+  { q: "Why did Patrick throw money in the sea?",      a: "He wanted to make a splash deposit." },
+];
+const dayIdx = new Date().getDate() % jokes.length;
+const joke = jokes[dayIdx];
+
+// Reading picks (rotates daily)
+const reads = [
+  { title: "Harry Potter & the Chamber of Spending",   vibe: "cozy + reread" },
+  { title: "The Life-Changing Magic of Tidying Receipts", vibe: "spark joy" },
+  { title: "Fourth Wing",                               vibe: "dragons > debt" },
+  { title: "Beach Read",                                vibe: "you deserve it" },
+  { title: "Six of Crows",                              vibe: "heist energy" },
+  { title: "A Court of Thorns and Roses",               vibe: "romantasy reset" },
+  { title: "Daisy Jones & The Six",                     vibe: "music + drama" },
+];
+const read = reads[dayIdx];
+---
+
+<Layout title="✨ Money Magic" showNav={false}>
+<style is:global>
+  @keyframes float  { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  @keyframes pulse  { 0%,100%{transform:scale(1);opacity:.85} 50%{transform:scale(1.12);opacity:1} }
+  @keyframes twinkle{ 0%,100%{opacity:.3} 50%{opacity:1} }
+  @keyframes wiggle { 0%,100%{transform:rotate(-2deg)} 50%{transform:rotate(2deg)} }
+  @keyframes shimmer{ 0%{background-position:-200% center} 100%{background-position:200% center} }
+  .floaty   { animation: float 4s ease-in-out infinite; }
+  .pulse-y  { animation: pulse 1.8s ease-in-out infinite; }
+  .twinkle  { animation: twinkle 2.5s ease-in-out infinite; }
+  .wiggle   { animation: wiggle 3s ease-in-out infinite; display:inline-block; }
+  .shimmer {
+    background: linear-gradient(90deg, #be185d 0%, #ec4899 25%, #f9a8d4 50%, #ec4899 75%, #be185d 100%);
+    background-size: 200% auto;
+    -webkit-background-clip: text; background-clip: text;
+    color: transparent;
+    animation: shimmer 4s linear infinite;
+  }
+</style>
+
+<main class="mx-auto max-w-md px-5 py-6 pb-24 min-h-screen"
+  style="background: radial-gradient(circle at 20% 10%, #ffe4ef 0%, #ffd9e7 45%, #ffc8dd 100%);">
+
+  <!-- Sparkle header -->
+  <header class="mb-6 text-center">
+    <div class="floaty text-3xl">🪄</div>
+    <p class="mt-1 text-xs uppercase tracking-widest text-pink-500/70">{monthName} · day {new Date().getDate()}</p>
+    <h1 class="mt-1 text-3xl font-bold"><span class="shimmer">Money Magic</span></h1>
+    <p class="mt-1 text-sm text-pink-800/70 italic">"I open at the close." — but the bills open now.</p>
+  </header>
+
+  <!-- Status oracle -->
+  <section class="mb-6 rounded-3xl bg-white/70 backdrop-blur-none px-5 py-4 shadow-pink-200/40 shadow-md"
+    style="border:2px solid rgba(244,114,182,.4);">
+    <div class="flex items-center gap-3">
+      <span class={`pulse-y inline-block h-5 w-5 rounded-full ${orbClass}`} style="box-shadow:0 0 14px currentColor;"></span>
+      <p class="text-xl font-bold text-pink-900">{statusHeadline}</p>
+    </div>
+    <p class="mt-1.5 text-sm text-pink-800/80 leading-relaxed">{statusSub}</p>
+  </section>
+
+  <!-- Big sparkly number: CC budget left this cycle -->
+  <section class="mb-6">
+    <p class="text-center text-xs uppercase tracking-widest text-pink-500/80 mb-1">✨ Galleons left to spend ✨</p>
+    <div class="rounded-3xl text-center py-6 px-4"
+      style="background:linear-gradient(135deg,#fff5fa,#ffe4ef); border:2px solid rgba(236,72,153,.35);">
+      <p class={`text-6xl font-extrabold tabular-nums ${ccRemaining < 0 ? 'text-rose-600' : 'text-pink-700'}`}>
+        {ccRemaining < 0 ? '−' : ''}{fmt(Math.abs(ccRemaining))}
+      </p>
+      <p class="mt-3 text-xs text-pink-800/70">
+        of {fmt(ccSpendBudget)} this cycle · {fmt(ccUsed)} already swiped · closes {cycleEndLabel}
+      </p>
+      {estimatedReserved > 0 && (
+        <p class="mt-1.5 text-xs text-pink-500">
+          🪄 {fmt(estimatedReserved)} reserved for upcoming purchases
+        </p>
+      )}
+    </div>
+  </section>
+
+  <!-- Daily joke -->
+  <section class="mb-6 rounded-3xl px-5 py-4"
+    style="background:linear-gradient(135deg,#fce7f3,#fbcfe8); border:2px solid rgba(244,114,182,.5);">
+    <p class="text-xs uppercase tracking-widest text-pink-700/80 mb-1">🤣 Daily Stupid Joke</p>
+    <p class="text-sm font-semibold text-pink-900">{joke.q}</p>
+    <p class="mt-1 text-sm text-pink-800/80 italic">{joke.a}</p>
+  </section>
+
+  <!-- Book recommendation -->
+  <section class="mb-6 rounded-3xl bg-white/60 px-5 py-4"
+    style="border:2px solid rgba(236,72,153,.25);">
+    <p class="text-xs uppercase tracking-widest text-pink-700/80 mb-1">📚 Tonight's read</p>
+    <p class="text-sm font-bold text-pink-900">{read.title}</p>
+    <p class="mt-0.5 text-xs text-pink-800/60 italic">vibe: {read.vibe}</p>
+    <p class="mt-2 text-xs text-pink-700/70">
+      "Books! And cleverness. There are more important things — friendship and bravery!"
+      <span class="ml-1 not-italic">⚡</span>
+    </p>
+  </section>
+
+  <footer class="text-center">
+    <a href="/budget" class="text-xs text-pink-700/60 hover:text-pink-900 transition-colors">
+      📗 peek at the full Gringotts ledger →
+    </a>
+    <p class="mt-2 text-[10px] text-pink-700/40 twinkle">
+      ⚡ no house-elves were harmed in the making of this page ⚡
+    </p>
+  </footer>
+</main>
+</Layout>
