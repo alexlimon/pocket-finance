@@ -1020,8 +1020,7 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
         current: curByCat.get(cat) ?? 0,
       }))
       .filter(c => c.current >= 25 || c.lean >= 25 || c.avg >= 25)
-      .sort((a, b) => (b.current - b.lean) - (a.current - a.lean)) // biggest overspend vs lean first
-      .slice(0, 8);
+      .sort((a, b) => (b.current - b.lean) - (a.current - a.lean)); // biggest overspend vs lean first
 
     benchmark = { leanMonth, leanTotal: leanAgg.total, avgSpend, target: (leanAgg.total + avgSpend) / 2, categories };
   }
