@@ -17,6 +17,8 @@ npm run migrate:billing # Run scripts/migrate-billing.ts
 
 There are no unit tests. Type-checking (`npm run check`) is the primary correctness gate.
 
+**Known pre-existing `npm run check` error:** `scripts/seed.ts:71` — `args: vals` fails with `Type 'unknown[]' is not assignable to type 'InArgs'`. This is unrelated to application code; don't treat it as a regression or spend time re-diagnosing it.
+
 **Dev server requires Node 20+** — `File` is not a global in Node 18 and the Cloudflare adapter will crash on startup. Workaround if stuck on Node 18: `NODE_OPTIONS="--require /tmp/file-polyfill.cjs" npm run dev` where the polyfill sets `global.File = require('buffer').File`.
 
 **Node 20 via Homebrew** — The system default may be Node 18 even after `brew link node@20`. If `node --version` still shows 18, prefix commands with the explicit path:
