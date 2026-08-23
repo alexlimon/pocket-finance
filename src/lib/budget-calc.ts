@@ -58,12 +58,16 @@ export function resolveBillStatus(
 const CC_PAYMENT_PATTERN = /cc\s*payment|credit\s*card\s*payment/i;
 
 export function categorizeBills(bills: ResolvedBill[]): {
-  checkingBills: ResolvedBill[];
-  ccBills:       ResolvedBill[];
+  checkingBills:        ResolvedBill[];
+  ccBills:              ResolvedBill[];
+  skippedCheckingBills: ResolvedBill[];
+  skippedCCBills:       ResolvedBill[];
 } {
   return {
-    checkingBills: bills.filter(b => !b.is_cc_default && !CC_PAYMENT_PATTERN.test(b.name) && !b.is_skipped),
-    ccBills:       bills.filter(b =>  !!b.is_cc_default && !b.is_skipped),
+    checkingBills:        bills.filter(b => !b.is_cc_default && !CC_PAYMENT_PATTERN.test(b.name) && !b.is_skipped),
+    ccBills:              bills.filter(b =>  !!b.is_cc_default && !b.is_skipped),
+    skippedCheckingBills: bills.filter(b => !b.is_cc_default && !CC_PAYMENT_PATTERN.test(b.name) && b.is_skipped),
+    skippedCCBills:       bills.filter(b =>  !!b.is_cc_default && b.is_skipped),
   };
 }
 
@@ -167,6 +171,7 @@ export function computeCCSpendingTracker(params: {
   savedDisplayMode?:  'estimated' | 'actual' | null;
 }): {
   ccBillsNextPayment:  ResolvedBill[];
+  skippedCCBillsNextPayment: ResolvedBill[];
   estimatedCCRecurring: number;
   actualCCRecurring:    number;
   allCCRecurringChecked: boolean;
@@ -191,6 +196,10 @@ export function computeCCSpendingTracker(params: {
   // Subs billed this cycle, paid next month
   const ccBillsNextPayment = nextBills.filter(b =>
     !b.is_skipped &&
+    ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, billingEndDay, nextMonth)
+  );
+  const skippedCCBillsNextPayment = nextBills.filter(b =>
+    b.is_skipped &&
     ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, billingEndDay, nextMonth)
   );
 
@@ -218,6 +227,7 @@ export function computeCCSpendingTracker(params: {
 
   return {
     ccBillsNextPayment,
+    skippedCCBillsNextPayment,
     estimatedCCRecurring,
     actualCCRecurring,
     allCCRecurringChecked,
