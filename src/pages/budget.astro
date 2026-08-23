@@ -133,7 +133,14 @@ try {
 const settingsMap          = new Map(ccSettings.map(s => [s.card, s]));
 const defaultBillingEndDay = settingsMap.get('sapphire')?.billing_end_day ?? 25;
 
-const { checkingBills, ccBills } = categorizeBills(bills);
+const { checkingBills, ccBills, skippedCheckingBills } = categorizeBills(bills);
+function sortBills(list: ResolvedBill[]) {
+  return [...list].sort((a, b) => {
+    const ad = a.due_day ?? 999, bd = b.due_day ?? 999;
+    return ad !== bd ? ad - bd : a.name.localeCompare(b.name);
+  });
+}
+const checkingBillsDisplay = sortBills([...checkingBills, ...skippedCheckingBills]);
 const bigPayGroups                = groupBigPurchasesByPayMonth(bigPurchases);
 
 const ccPayment = computeCCPayment({
@@ -165,8 +172,9 @@ const balances = computeBalances(summary, cashFlow.netAmount);
 
 // Destructure for template use
 const { ccBillsForPayment, recurringMode: ccRecurringMode, recurringBudget: ccRecurringBudget, ccPaymentAmount } = ccPayment;
-const { ccBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
+const { ccBillsNextPayment, skippedCCBillsNextPayment, estimatedCCRecurring, actualCCRecurring, ccDisplayMode, ccRecurringInVariable,
         variableSpendMap, ccVariableTotal, ccVariableOnly, ccBig, ccEstimated, ccUsed, ccTotalCharged, ccSpendBudget, ccRemaining, ccUsedPct } = ccTracker;
+const ccBillsNextPaymentDisplay = sortBills([...ccBillsNextPayment, ...skippedCCBillsNextPayment]);
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
@@ -381,22 +389,32 @@ const projection = projectCCSpend({
   <div class="rounded-xl border border-surface-border bg-surface-card p-4">
     <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Fixed Bills — Checking</h2>
     <div class="space-y-1" id="checking-bills">
-      {checkingBills.map(b => (
-        <div class="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover group" data-bill-id={b.id}>
+      {checkingBillsDisplay.map(b => (
+        <div class={`flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover group ${b.is_skipped ? 'opacity-40' : ''}`} data-bill-id={b.id}>
           <div class="flex items-center gap-2 min-w-0">
-            <input type="checkbox" checked={b.effective_paid}
-              class="bill-toggle h-4 w-4 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
-              data-bill={b.id} data-month={month} data-is-cc="0" data-is-auto={b.is_auto ? '1' : '0'}
-            />
-            <span class={`text-sm truncate ${b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
-            {b.due_day && <span class="text-xs text-stone-400 flex-shrink-0">{b.due_day}th</span>}
+            {b.is_skipped
+              ? <span class="h-4 w-4 flex-shrink-0" />
+              : <input type="checkbox" checked={b.effective_paid}
+                  class="bill-toggle h-4 w-4 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
+                  data-bill={b.id} data-month={month} data-is-cc="0" data-is-auto={b.is_auto ? '1' : '0'}
+                />
+            }
+            <span class={`text-sm truncate ${b.is_skipped ? 'text-stone-400 line-through' : b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
+            {b.due_day && !b.is_skipped && <span class="text-xs text-stone-400 flex-shrink-0">{b.due_day}th</span>}
+            {b.is_skipped && <span class="text-xs text-stone-400 italic">skipped</span>}
             {b.is_auto && <span class="text-xs text-stone-400 italic">auto</span>}
           </div>
           <div class="flex items-center gap-1 flex-shrink-0">
-            <span class={`editable-bill-amount tabular-nums text-sm cursor-pointer rounded px-1.5 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
-              data-bill={b.id} data-month={month} data-is-cc="0">{fmt(b.actual_amount)}</span>
-            <button class="skip-bill opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-1 transition-opacity"
-              data-bill={b.id} data-month={month} title="Skip this month">✕</button>
+            {b.is_skipped
+              ? <button class="unskip-bill opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-2 py-0.5 rounded border border-surface-border text-stone-400 hover:text-brand-green hover:border-brand-green transition-opacity"
+                  data-bill={b.id} data-month={month}>Unskip</button>
+              : <>
+                  <span class={`editable-bill-amount tabular-nums text-sm cursor-pointer rounded px-1.5 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
+                    data-bill={b.id} data-month={month} data-is-cc="0">{fmt(b.actual_amount)}</span>
+                  <button class="skip-bill opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-1 transition-opacity"
+                    data-bill={b.id} data-month={month} title="Skip this month">✕</button>
+                </>
+            }
           </div>
         </div>
       ))}
@@ -655,30 +673,40 @@ const projection = projectCCSpend({
   </div>
 
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1" id="cc-bills">
-    {ccBillsNextPayment.map(b => {
+    {ccBillsNextPaymentDisplay.map(b => {
       const bm = subBillingMonth(b, defaultBillingEndDay, month);
       const billingLabel = bm ? `${new Date(bm+'-01').toLocaleString('en-US',{month:'short'})}` : '';
       return (
-        <div class="group flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover" data-bill-id={b.id}>
+        <div class={`group flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover ${b.is_skipped ? 'opacity-40' : ''}`} data-bill-id={b.id}>
           <div class="flex items-center gap-1.5 min-w-0">
-            <input type="checkbox" checked={b.effective_paid}
-              class="bill-toggle h-3.5 w-3.5 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
-              data-bill={b.id} data-month={next} data-is-cc="1" data-is-auto={b.is_auto ? '1' : '0'}
-            />
-            <span class={`text-xs truncate ${b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
-            {(billingLabel || b.due_day) && (
+            {b.is_skipped
+              ? <span class="h-3.5 w-3.5 flex-shrink-0" />
+              : <input type="checkbox" checked={b.effective_paid}
+                  class="bill-toggle h-3.5 w-3.5 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
+                  data-bill={b.id} data-month={next} data-is-cc="1" data-is-auto={b.is_auto ? '1' : '0'}
+                />
+            }
+            <span class={`text-xs truncate ${b.is_skipped ? 'text-stone-400 line-through' : b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
+            {!b.is_skipped && (billingLabel || b.due_day) && (
               <span class="text-xs text-stone-300 flex-shrink-0" title="Billing month · due day">
                 {billingLabel}{b.due_day ? ` ${b.due_day}` : ''}
               </span>
             )}
+            {b.is_skipped && <span class="text-xs text-stone-400 italic">skipped</span>}
             {b.is_auto && <span class="text-xs text-stone-400">*</span>}
           </div>
           <div class="flex items-center gap-1 flex-shrink-0">
-            <span class="match-hint hidden text-xs text-emerald-600 tabular-nums" data-bill-match={b.id}></span>
-            <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
-              data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
-            <button class="cc-sub-skip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
-              data-bill-id={b.id} data-month={next} title="Skip this sub for this month">✕</button>
+            {b.is_skipped
+              ? <button class="cc-sub-unskip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1.5 py-0.5 rounded border border-surface-border text-stone-400 hover:text-brand-green hover:border-brand-green leading-none"
+                  data-bill-id={b.id} data-month={next}>Unskip</button>
+              : <>
+                  <span class="match-hint hidden text-xs text-emerald-600 tabular-nums" data-bill-match={b.id}></span>
+                  <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
+                    data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
+                  <button class="cc-sub-skip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
+                    data-bill-id={b.id} data-month={next} title="Skip this sub for this month">✕</button>
+                </>
+            }
           </div>
         </div>
       );
@@ -1031,6 +1059,16 @@ document.getElementById('recurring-mode-toggle')?.addEventListener('click', () =
 
   // Persist the chosen mode so it survives page reload
   api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${MONTH}`, value: mode }).catch(() => {});
+});
+
+// ── CC recurring sub unskip ───────────────────────────────────────────────────
+document.getElementById('cc-bills')?.addEventListener('click', async e => {
+  const btn = (e.target as HTMLElement).closest<HTMLElement>('.cc-sub-unskip');
+  if (!btn) return;
+  try {
+    await api('/api/budget/bill-skip', 'POST', { month: btn.dataset.month!, bill_id: btn.dataset.billId!, skip: false });
+    window.location.reload();
+  } catch { alert('Could not unskip subscription.'); }
 });
 
 // ── CC recurring sub skip ─────────────────────────────────────────────────────
@@ -1516,6 +1554,16 @@ document.querySelectorAll<HTMLButtonElement>('.skip-bill').forEach(btn => {
     row?.remove();
     // Refresh the page so totals recalculate
     window.location.reload();
+  });
+});
+
+// ── Unskip bill ──────────────────────────────────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.unskip-bill').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    try {
+      await api('/api/budget/bill-skip', 'POST', { month: btn.dataset.month!, bill_id: btn.dataset.bill!, skip: false });
+      window.location.reload();
+    } catch { alert('Could not unskip bill.'); }
   });
 });
 
