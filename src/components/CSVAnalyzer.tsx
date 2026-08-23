@@ -130,7 +130,9 @@ function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
       due_day,
     });
   }
-  return results.sort((a, b) => b.months.length - a.months.length || b.amount - a.amount);
+  return results.sort((a, b) =>
+    b.months[b.months.length - 1]!.localeCompare(a.months[a.months.length - 1]!) || b.amount - a.amount
+  );
 }
 
 interface CategoryRow { cat: string; amount: number; pct: number; count: number }
