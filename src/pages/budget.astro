@@ -267,7 +267,7 @@ const projection = projectCCSpend({
       <span class="tabular-nums font-medium text-brand-red" id="cf-cc-payment">-{fmt(ccPaymentAmount)}</span>
     </div>
     <div class="pl-4 space-y-1 text-xs text-stone-400">
-      <div class="flex justify-between"><span>Variable + Big</span><span class="tabular-nums cursor-pointer rounded px-1 hover:bg-surface-hover" data-field="cc_budget" data-month={month} title="Click to edit">{fmt(Number(summary.cc_budget))}</span></div>
+      <div class="flex justify-between"><span>Variable + Big</span><span class="tabular-nums cursor-pointer rounded px-1 hover:bg-surface-hover" data-field="cc_budget" data-month={month} data-recurring-offset={ccRecurringBudget} title="Click to edit">{fmt(Number(summary.cc_budget) - ccRecurringBudget)}</span></div>
       <div class="flex justify-between"><span>Recurring <span class="text-stone-300">({ccRecurringMode === 'estimated' ? 'est' : 'act'})</span></span><span class="tabular-nums" id="cf-cc-recurring">{fmt(ccRecurringBudget)}</span></div>
     </div>
 
@@ -1121,6 +1121,9 @@ document.getElementById('cc-bills')?.addEventListener('click', async e => {
 document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el => {
   el.addEventListener('click', () => {
     const fieldMonth = el.dataset.month!;
+    // The Variable+Big line displays cc_budget minus recurring — add it back
+    // before saving so cc_budget (the full statement total) stays correct.
+    const recurringOffset = parseFloat(el.dataset.recurringOffset ?? '0') || 0;
     const cur = parseFloat(el.textContent!.replace(/[$,]/g,'')) || 0;
     const inp = document.createElement('input');
     inp.type='number'; inp.step='0.01'; inp.value=String(cur);
@@ -1131,7 +1134,8 @@ document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el =>
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
       if (!isNaN(v) && v !== cur) {
-        await api('/api/budget/summary','POST',{month:fieldMonth,cc_budget:v}).catch(()=>{});
+        const fullValue = v + recurringOffset;
+        await api('/api/budget/summary','POST',{month:fieldMonth,cc_budget:fullValue}).catch(()=>{});
         // If this is the spending budget (next month), update the bar too
         if (el.id === 'cc-budget-display') {
           el.dataset.recurring = el.dataset.recurring ?? '0';
@@ -1140,7 +1144,7 @@ document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el =>
         // If this is the Variable+Big line, recalc cash flow
         const sec = document.getElementById('cc-recurring-section') as HTMLElement;
         if (sec) {
-          sec.dataset.ccVariableBudget = String(isNaN(v) ? cur : v);
+          sec.dataset.ccVariableBudget = String(isNaN(v) ? cur + recurringOffset : fullValue);
           // CC Payment's recurring = last billing cycle (paid this month), independent of the display toggle.
           const paymentRecurring = parseFloat(sec.dataset.paymentRecurring ?? '0');
           recalcCashFlow(paymentRecurring);
