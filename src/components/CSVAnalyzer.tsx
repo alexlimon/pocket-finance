@@ -34,6 +34,7 @@ interface AmazonMatch {
 }
 
 type Tab = 'upload' | 'suggestions' | 'subscriptions' | 'categories' | 'amazon' | 'statements' | 'top' | 'vendors' | 'mortgage';
+type Granularity = 'month' | 'quarter';
 
 interface Props {
   initialTransactions: string;
@@ -68,13 +69,47 @@ function isWeekend(iso: string): boolean {
   return day === 0 || day === 6;
 }
 
-// The 3 calendar months immediately before `ym` (YYYY-MM), oldest→newest.
+// The n calendar months immediately before `ym` (YYYY-MM), oldest→newest.
 function priorMonths(ym: string, n: number): string[] {
   const [y, m] = ym.split('-').map(Number);
   const base = y * 12 + (m - 1);
   return Array.from({ length: n }, (_, i) => {
     const idx = base - n + i;
     return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
+  });
+}
+
+// Calendar-quarter key for a date, e.g. "2026-Q1".
+function quarterKey(iso: string): string {
+  const [y, m] = iso.slice(0, 7).split('-').map(Number);
+  return `${y}-Q${Math.floor((m - 1) / 3) + 1}`;
+}
+
+function periodKey(iso: string, granularity: Granularity): string {
+  return granularity === 'month' ? iso.slice(0, 7) : quarterKey(iso);
+}
+
+function periodLabel(period: string, granularity: Granularity): string {
+  if (granularity === 'month') return monthLabel(period);
+  const [y, q] = period.split('-Q');
+  return `Q${q} ${y}`;
+}
+
+// ISO date of the first day of a period, for comparing against an account's earliest transaction.
+function periodStartDate(period: string, granularity: Granularity): string {
+  if (granularity === 'month') return `${period}-01`;
+  const [y, q] = period.split('-Q').map(Number);
+  return `${y}-${String((q - 1) * 3 + 1).padStart(2, '0')}-01`;
+}
+
+// The n periods (months or quarters) immediately before `period`, oldest→newest.
+function priorPeriods(period: string, n: number, granularity: Granularity): string[] {
+  if (granularity === 'month') return priorMonths(period, n);
+  const [y, q] = period.split('-Q').map(Number);
+  const base = y * 4 + (q - 1);
+  return Array.from({ length: n }, (_, i) => {
+    const idx = base - n + i;
+    return `${Math.floor(idx / 4)}-Q${(idx % 4) + 1}`;
   });
 }
 
@@ -928,40 +963,52 @@ interface LeanCategory {
 }
 
 interface Benchmark {
-  leanMonth:  string;         // leanest month within the previous year
+  leanPeriod: string;         // leanest period within the baseline window
   leanTotal:  number;
-  avgSpend:   number;         // average month across the previous year
+  avgSpend:   number;         // average period across the baseline window
   target:     number;         // a realistic "medium" between lean and average
-  categories: LeanCategory[]; // per-category: leanest month vs this month
+  categories: LeanCategory[]; // per-category: leanest period vs this period
 }
 
 interface Suggestions {
-  month:          string;
-  total:          number;
-  txnCount:       number;
-  baselineMonths: number;
-  topMerchants:   { vendor: string; count: number; total: number }[];
-  topPurchases:   CsvTransaction[];
-  otherPurchases: CsvTransaction[];
-  otherCount:     number;
-  otherTotal:     number;
-  smallCount:     number;
-  smallTotal:     number;
-  weekendShare:   number;
-  benchmark:      Benchmark | null;
-  headlines:      string[];
+  period:          string;
+  granularity:     Granularity;
+  total:           number;
+  txnCount:        number;
+  baselinePeriods: number;
+  topMerchants:    { vendor: string; count: number; total: number }[];
+  topPurchases:    CsvTransaction[];
+  otherPurchases:  CsvTransaction[];
+  otherCount:      number;
+  otherTotal:      number;
+  smallCount:      number;
+  smallTotal:      number;
+  weekendShare:    number;
+  benchmark:       Benchmark | null;
+  headlines:       string[];
 }
 
-const SMALL_PURCHASE   = 15;
-const BASELINE_WINDOW  = 12;  // "the previous year" — trailing 12 months
-const MIN_REAL_TXNS    = 5;   // a month with fewer looks like a partial statement
-const MATERIAL_OVERAGE = 150; // dollar gap vs the lean month worth a headline
+const SMALL_PURCHASE          = 15;
+const CATEGORY_MIN            = 25;  // per-category floor worth showing in the benchmark table
+const BASELINE_WINDOW_MONTH   = 12;  // "the previous year" — trailing 12 months
+const BASELINE_WINDOW_QUARTER = 8;   // trailing 2 years — quarters are coarser, so look further back
+const MIN_REAL_TXNS_MONTH     = 5;   // a month with fewer looks like a partial statement
+const MIN_REAL_TXNS_QUARTER   = 15;  // ditto, scaled for a full quarter's worth of activity
+const MATERIAL_OVERAGE        = 150; // dollar gap vs the lean period worth a headline (per month)
 
-function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions {
+function computeSuggestions(txns: CsvTransaction[], period: string, granularity: Granularity): Suggestions {
+  // Quarters aggregate ~3x the transactions/dollars of a month — scale dollar
+  // and count thresholds accordingly so headlines stay meaningful either way.
+  const periodMultiplier = granularity === 'month' ? 1 : 3;
+  const baselineWindow   = granularity === 'month' ? BASELINE_WINDOW_MONTH : BASELINE_WINDOW_QUARTER;
+  const minRealTxns      = granularity === 'month' ? MIN_REAL_TXNS_MONTH : MIN_REAL_TXNS_QUARTER;
+  const periodWord       = granularity === 'month' ? 'month' : 'quarter';
+  const baselineSpan     = granularity === 'month' ? 'last year' : 'over the past 2 years';
+
   const purchases = txns.filter(isPurchase);
-  const cur  = purchases.filter(t => t.date.slice(0, 7) === month);
-  const baseMonthSet = new Set(priorMonths(month, BASELINE_WINDOW));
-  const base = purchases.filter(t => baseMonthSet.has(t.date.slice(0, 7)));
+  const cur  = purchases.filter(t => periodKey(t.date, granularity) === period);
+  const basePeriodSet = new Set(priorPeriods(period, baselineWindow, granularity));
+  const base = purchases.filter(t => basePeriodSet.has(periodKey(t.date, granularity)));
 
   const total = cur.reduce((s, t) => s + Math.abs(t.amount), 0);
 
@@ -995,95 +1042,126 @@ function computeSuggestions(txns: CsvTransaction[], month: string): Suggestions 
   const weekendSpend = cur.filter(t => isWeekend(t.date)).reduce((s, t) => s + Math.abs(t.amount), 0);
   const weekendShare = total > 0 ? weekendSpend / total : 0;
 
-  // Benchmark — leanest month within the PREVIOUS YEAR, broken down per
-  // category. Skip near-empty months that are really partial statements.
-  const monthAgg = new Map<string, { total: number; count: number }>();
-  for (const t of base) {
-    const ym = t.date.slice(0, 7);
-    const a = monthAgg.get(ym) ?? { total: 0, count: 0 };
-    a.total += Math.abs(t.amount); a.count += 1;
-    monthAgg.set(ym, a);
+  // Benchmark — leanest period within the baseline window, broken down per
+  // category. Skip near-empty periods that are really partial statements, and
+  // skip periods that predate full coverage of the accounts active this
+  // period — otherwise a quarter from before an account's CSV history began
+  // (missing that account's spend entirely) looks artificially "lean".
+  const acctMinDate = new Map<string, string>();
+  for (const t of purchases) {
+    const known = acctMinDate.get(t.account_last4);
+    if (!known || t.date < known) acctMinDate.set(t.account_last4, t.date);
   }
-  const realMonths = [...monthAgg.entries()].filter(([, a]) => a.count >= MIN_REAL_TXNS);
+  const curAccounts = new Set(cur.map(t => t.account_last4));
+  const hasFullCoverage = (candidatePeriod: string) => {
+    const start = periodStartDate(candidatePeriod, granularity);
+    for (const acct of curAccounts) {
+      const minDate = acctMinDate.get(acct);
+      if (!minDate || minDate > start) return false;
+    }
+    return true;
+  };
+
+  const periodAgg = new Map<string, { total: number; count: number }>();
+  for (const t of base) {
+    const key = periodKey(t.date, granularity);
+    const a = periodAgg.get(key) ?? { total: 0, count: 0 };
+    a.total += Math.abs(t.amount); a.count += 1;
+    periodAgg.set(key, a);
+  }
+  const realPeriods = [...periodAgg.entries()].filter(([p, a]) => a.count >= minRealTxns && hasFullCoverage(p));
 
   let benchmark: Benchmark | null = null;
-  if (realMonths.length >= 3) {
-    const [leanMonth, leanAgg] = realMonths.reduce((min, e) => (e[1].total < min[1].total ? e : min));
-    const avgSpend = realMonths.reduce((s, [, a]) => s + a.total, 0) / realMonths.length;
-    const realMonthSet = new Set(realMonths.map(([ym]) => ym));
+  if (realPeriods.length >= 3) {
+    const [leanPeriod, leanAgg] = realPeriods.reduce((min, e) => (e[1].total < min[1].total ? e : min));
+    const avgSpend = realPeriods.reduce((s, [, a]) => s + a.total, 0) / realPeriods.length;
+    const realPeriodSet = new Set(realPeriods.map(([p]) => p));
 
     const leanByCat = new Map<string, number>();
-    const sumByCat  = new Map<string, number>(); // summed across real months, for the average column
+    const sumByCat  = new Map<string, number>(); // summed across real periods, for the average column
     for (const t of base) {
-      const ym  = t.date.slice(0, 7);
-      if (!realMonthSet.has(ym)) continue;
+      const key = periodKey(t.date, granularity);
+      if (!realPeriodSet.has(key)) continue;
       const cat = t.category || 'Other';
       sumByCat.set(cat, (sumByCat.get(cat) ?? 0) + Math.abs(t.amount));
-      if (ym === leanMonth) leanByCat.set(cat, (leanByCat.get(cat) ?? 0) + Math.abs(t.amount));
+      if (key === leanPeriod) leanByCat.set(cat, (leanByCat.get(cat) ?? 0) + Math.abs(t.amount));
     }
+    const categoryMin = CATEGORY_MIN * periodMultiplier;
     const categories: LeanCategory[] = [...new Set([...curByCat.keys(), ...leanByCat.keys(), ...sumByCat.keys()])]
       .map(cat => ({
         cat,
         lean:    leanByCat.get(cat) ?? 0,
-        avg:     (sumByCat.get(cat) ?? 0) / realMonths.length,
+        avg:     (sumByCat.get(cat) ?? 0) / realPeriods.length,
         current: curByCat.get(cat) ?? 0,
       }))
-      .filter(c => c.current >= 25 || c.lean >= 25 || c.avg >= 25)
+      .filter(c => c.current >= categoryMin || c.lean >= categoryMin || c.avg >= categoryMin)
       .sort((a, b) => (b.current - b.lean) - (a.current - a.lean)); // biggest overspend vs lean first
 
-    benchmark = { leanMonth, leanTotal: leanAgg.total, avgSpend, target: (leanAgg.total + avgSpend) / 2, categories };
+    benchmark = { leanPeriod, leanTotal: leanAgg.total, avgSpend, target: (leanAgg.total + avgSpend) / 2, categories };
   }
 
   // Headlines — blunt callouts, ordered by how much they matter in dollars.
   const headlines: string[] = [];
 
   if (benchmark && total > benchmark.target * 1.1)
-    headlines.push(`You're ${fmt(total - benchmark.target)} over a realistic target of ${fmt(benchmark.target)} — your leanest month last year was ${monthLabel(benchmark.leanMonth)} at ${fmt(benchmark.leanTotal)}.`);
+    headlines.push(`You're ${fmt(total - benchmark.target)} over a realistic target of ${fmt(benchmark.target)} — your leanest ${periodWord} ${baselineSpan} was ${periodLabel(benchmark.leanPeriod, granularity)} at ${fmt(benchmark.leanTotal)}.`);
 
   const topCat = benchmark?.categories[0];
-  if (topCat && topCat.current - topCat.lean >= MATERIAL_OVERAGE)
-    headlines.push(`${topCat.cat}: ${fmt(topCat.current)} this month vs ${fmt(topCat.lean)} in your leanest month — ${fmt(topCat.current - topCat.lean)} more.`);
+  if (topCat && topCat.current - topCat.lean >= MATERIAL_OVERAGE * periodMultiplier)
+    headlines.push(`${topCat.cat}: ${fmt(topCat.current)} this ${periodWord} vs ${fmt(topCat.lean)} in your leanest ${periodWord} — ${fmt(topCat.current - topCat.lean)} more.`);
 
   const frequent = [...merchants].sort((a, b) => b.count - a.count)[0];
-  if (frequent && frequent.count >= 8)
-    headlines.push(`${frequent.count} charges from ${frequent.vendor} this month (${fmt(frequent.total)}).`);
+  if (frequent && frequent.count >= 8 * periodMultiplier)
+    headlines.push(`${frequent.count} charges from ${frequent.vendor} this ${periodWord} (${fmt(frequent.total)}).`);
 
-  if (small.length >= 15)
+  if (small.length >= 15 * periodMultiplier)
     headlines.push(`${small.length} purchases under ${fmt(SMALL_PURCHASE)} added up to ${fmt(smallTotal)}.`);
 
   if (weekendShare >= 0.55 && total > 0)
     headlines.push(`${Math.round(weekendShare * 100)}% of your spend landed on weekends.`);
 
   return {
-    month, total, txnCount: cur.length, baselineMonths: realMonths.length,
+    period, granularity, total, txnCount: cur.length, baselinePeriods: realPeriods.length,
     topMerchants, topPurchases, otherPurchases: rest, otherCount, otherTotal, smallCount: small.length, smallTotal, weekendShare, benchmark, headlines,
   };
 }
 
 function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
-  const months = useMemo(
-    () => [...new Set(txns.filter(isPurchase).map(t => t.date.slice(0, 7)))].sort().reverse(),
-    [txns],
+  const [granularity, setGranularity] = useState<Granularity>('month');
+  const periods = useMemo(
+    () => [...new Set(txns.filter(isPurchase).map(t => periodKey(t.date, granularity)))].sort().reverse(),
+    [txns, granularity],
   );
-  const [month, setMonth] = useState<string>('');
-  const active = month || months[0] || '';
-  const s = useMemo(() => active ? computeSuggestions(txns, active) : null, [txns, active]);
+  const [period, setPeriod] = useState<string>('');
+  useEffect(() => { setPeriod(''); }, [granularity]);
+  const active = period || periods[0] || '';
+  const s = useMemo(() => active ? computeSuggestions(txns, active, granularity) : null, [txns, active, granularity]);
   const [otherExpanded, setOtherExpanded] = useState(false);
+  const periodWord = granularity === 'month' ? 'month' : 'quarter';
 
   if (!txns.length) return <EmptyState message="No transaction data yet. Upload CSVs in the Upload tab." />;
-  if (!s || s.txnCount === 0) return <EmptyState message="No purchases found for this month." />;
+  if (!s || s.txnCount === 0) return <EmptyState message={`No purchases found for this ${periodWord}.`} />;
 
   return (
     <div className="space-y-4">
-      {/* Month selector */}
-      <div className="flex items-center gap-2">
-        <label className="text-sm text-stone-500">Month</label>
-        <select value={active} onChange={e => setMonth(e.target.value)}
+      {/* Period selector */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex rounded-lg border border-stone-200 bg-white p-0.5">
+          {(['month', 'quarter'] as Granularity[]).map(g => (
+            <button key={g} type="button" onClick={() => setGranularity(g)}
+              className={`rounded-md px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
+                granularity === g ? 'bg-stone-800 text-white' : 'text-stone-500 hover:text-stone-800'
+              }`}>
+              {g}
+            </button>
+          ))}
+        </div>
+        <select value={active} onChange={e => setPeriod(e.target.value)}
           className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-800">
-          {months.map(m => <option key={m} value={m}>{monthLabel(m)}</option>)}
+          {periods.map(p => <option key={p} value={p}>{periodLabel(p, granularity)}</option>)}
         </select>
         <span className="text-xs text-stone-400">
-          vs {s.baselineMonths}-month history · {fmt(s.total)} total
+          vs {s.baselinePeriods}-{periodWord} history · {fmt(s.total)} total
         </span>
       </div>
 
@@ -1100,17 +1178,17 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
         </div>
       ) : (
         <div className="rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-500">
-          No standout patterns this month — spending looks in line with your usual.
+          No standout patterns this {periodWord} — spending looks in line with your usual.
         </div>
       )}
 
-      {/* Comparing months: leanest month, yearly average, and this month, per category */}
+      {/* Comparing periods: leanest period, baseline average, and this period, per category */}
       {s.benchmark && (
         <div className="rounded-xl border border-stone-200 bg-white p-4">
           <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
-            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Comparing months</p>
+            <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Comparing {periodWord}s</p>
             <p className="text-xs text-stone-400">
-              {monthLabel(s.benchmark.leanMonth)} was your leanest month · target ~{fmt(s.benchmark.target)}
+              {periodLabel(s.benchmark.leanPeriod, granularity)} was your leanest {periodWord} · target ~{fmt(s.benchmark.target)}
             </p>
           </div>
 
@@ -1118,9 +1196,9 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
             <thead>
               <tr className="border-b border-stone-100 text-xs text-stone-400">
                 <th className="py-1.5 text-left font-medium">Category</th>
-                <th className="py-1.5 text-right font-medium">{monthLabel(s.benchmark.leanMonth)}</th>
-                <th className="py-1.5 text-right font-medium">Yearly avg</th>
-                <th className="py-1.5 text-right font-medium">This month</th>
+                <th className="py-1.5 text-right font-medium">{periodLabel(s.benchmark.leanPeriod, granularity)}</th>
+                <th className="py-1.5 text-right font-medium">{granularity === 'month' ? 'Yearly avg' : '2-yr avg'}</th>
+                <th className="py-1.5 text-right font-medium">This {periodWord}</th>
                 <th className="py-1.5 text-right font-medium">Δ</th>
               </tr>
             </thead>
@@ -1157,7 +1235,7 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
 
       {/* Top merchants */}
       <div className="rounded-xl border border-stone-200 bg-white p-4">
-        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top merchants this month</p>
+        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top merchants this {periodWord}</p>
         <ul className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
           {s.topMerchants.map((m, i) => (
             <li key={i} className="flex items-baseline justify-between gap-2 text-sm">
@@ -1172,7 +1250,7 @@ function SuggestionsPanel({ txns }: { txns: CsvTransaction[] }) {
 
       {/* Top 50 purchases */}
       <div className="rounded-xl border border-stone-200 bg-white p-4">
-        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top 50 purchases this month</p>
+        <p className="mb-2 text-xs font-medium uppercase tracking-wide text-stone-400">Top 50 purchases this {periodWord}</p>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
