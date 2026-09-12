@@ -13,6 +13,7 @@ npm run seed            # Run scripts/seed.ts to populate DB
 npm run init            # Import from Google Sheet via scripts/init-from-sheet.ts
 npm run migrate         # Run scripts/migrate-budget.ts
 npm run migrate:billing # Run scripts/migrate-billing.ts
+npm run backup          # Dump the Turso DB to backups/*.sql (see Database backup & restore)
 ```
 
 There are no unit tests. Type-checking (`npm run check`) is the primary correctness gate.
@@ -87,6 +88,59 @@ The `monthly_summary` table is the central ledger row for each month, storing in
 
 - `ImpactCalculator` ([src/components/ImpactCalculator.tsx](src/components/ImpactCalculator.tsx)) — What-If scenario projector; receives `monthBaselines[]` as a serialized prop from `index.astro`
 - `PlaidLink` ([src/components/PlaidLink.tsx](src/components/PlaidLink.tsx)) — Plaid Link flow
+
+## Database backup & restore
+
+**Take a backup before any deploy that touches budget logic or runs a migration.** The database in
+`.dev.vars` holds real financial history, not fixtures — scripts and the dev server write to live
+data. Confirm whether local and Cloudflare point at the same Turso instance before assuming a local
+experiment is isolated.
+
+```bash
+npm run backup   # → backups/pocket-finance-<UTC-timestamp>.sql
+```
+
+[scripts/backup-db.ts](scripts/backup-db.ts) dumps schema + data for every table as plain SQL
+(`CREATE TABLE` + `INSERT`, then indexes/triggers). `backups/` is gitignored and **must stay that
+way** — the dump is the full financial history in plaintext, and the `settings` table inside it
+holds the session token and the API-key hash. Never commit it or sync it anywhere shared.
+
+### Verifying a backup
+
+A dump you haven't restored isn't a backup. To check one:
+
+```bash
+sqlite3 /tmp/restore.db < backups/<file>.sql
+sqlite3 /tmp/restore.db "PRAGMA integrity_check;"
+```
+
+**Do not compare values using the `sqlite3` CLI's default output** — it prints `0` as `0.0` and
+truncates doubles to 15 digits (`8091.830000000001` shows as `8091.83`), which looks like data loss
+but is only formatting. To compare against live, read *both* sides through `@libsql/client` so the
+same code path converts the values, or use `format('%!.17g', col)` in SQL for exact float text.
+
+### Restoring
+
+The dump has no `DROP TABLE` statements, so replaying it onto a database that still has tables
+fails rather than half-merging the ledger. That's deliberate. To actually roll back:
+
+```bash
+# 1. Create a fresh Turso database and load the dump into it
+turso db create pocket-finance-restore
+turso db shell pocket-finance-restore < backups/<file>.sql
+
+# 2. Point the app at it — update TURSO_DATABASE_URL (and token) in BOTH:
+#      .dev.vars                             (local)
+#      Cloudflare dashboard → limetiramisu   (production, Settings → Environment Variables)
+```
+
+The `turso` CLI is not installed on this machine — install it via the current instructions at
+<https://docs.turso.tech/cli/installation> (the Homebrew tap name has changed over time, so prefer
+the docs over a remembered formula). `sqlite3` ships with macOS and is enough for local inspection
+and verification; only the push-back-to-Turso step needs the CLI.
+
+A snapshot only protects data written *before* it was taken. Check whether the Turso plan includes
+point-in-time restore — that covers the gap between the last `npm run backup` and a failure.
 
 ## Deployment
 

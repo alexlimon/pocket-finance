@@ -14,7 +14,8 @@
     "migrate:csv": "npx tsx scripts/migrate-csv-transactions.ts",
     "migrate:amazon": "npx tsx scripts/migrate-amazon-orders.ts",
     "migrate:amazon-v2": "npx tsx scripts/migrate-amazon-v2.ts",
-    "migrate:amazon-v3": "npx tsx scripts/migrate-amazon-v3.ts"
+    "migrate:amazon-v3": "npx tsx scripts/migrate-amazon-v3.ts",
+    "backup": "npx tsx scripts/backup-db.ts"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.8",
