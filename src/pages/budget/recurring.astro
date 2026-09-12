@@ -180,6 +180,28 @@ async function api(url: string, method: string, body: object) {
   return r.json();
 }
 
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+function showError(msg: string) {
+  let toast = document.getElementById('save-error-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'save-error-toast';
+    toast.setAttribute('role', 'alert');
+    toast.className = 'fixed bottom-20 sm:bottom-6 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast!.style.opacity = '0'; }, 5000);
+}
+
+function showSaveError(err: unknown, what: string) {
+  const detail = err instanceof Error && err.message &&
+    !/^(Error|Failed to fetch|NetworkError|Load failed)$/i.test(err.message) ? err.message : null;
+  showError(detail ? `Could not save ${what} — ${detail}` : `Could not save ${what}. Check your connection and try again.`);
+}
+
 // ── Inline name edit ─────────────────────────────────────────────────────────
 document.querySelectorAll<HTMLElement>('.editable-name').forEach(el => {
   el.addEventListener('click', () => {
@@ -191,7 +213,14 @@ document.querySelectorAll<HTMLElement>('.editable-name').forEach(el => {
       const v = inp.value.trim();
       el.textContent = v || cur;
       inp.replaceWith(el);
-      if (v && v !== cur) await api('/api/budget/recurring','PATCH',{id,name:v}).catch(()=>{});
+      if (v && v !== cur) {
+        try {
+          await api('/api/budget/recurring','PATCH',{id,name:v});
+        } catch (err) {
+          el.textContent = cur;
+          showSaveError(err, 'the name');
+        }
+      }
     }
     inp.addEventListener('blur',save);
     inp.addEventListener('keydown',e=>{if(e.key==='Enter')save();if(e.key==='Escape'){el.textContent=cur;inp.replaceWith(el);}});
@@ -210,7 +239,14 @@ document.querySelectorAll<HTMLElement>('.editable-amount').forEach(el => {
       const v = parseFloat(inp.value);
       el.textContent = isNaN(v)?usd(cur):usd(v);
       inp.replaceWith(el);
-      if (!isNaN(v) && v !== cur) await api('/api/budget/recurring','PATCH',{id,monthly_target:v}).catch(()=>{});
+      if (!isNaN(v) && v !== cur) {
+        try {
+          await api('/api/budget/recurring','PATCH',{id,monthly_target:v});
+        } catch (err) {
+          el.textContent = usd(cur);
+          showSaveError(err, 'the amount');
+        }
+      }
     }
     inp.addEventListener('blur',save);
     inp.addEventListener('keydown',e=>{if(e.key==='Enter')save();if(e.key==='Escape'){el.textContent=usd(cur);inp.replaceWith(el);}});
@@ -220,8 +256,14 @@ document.querySelectorAll<HTMLElement>('.editable-amount').forEach(el => {
 // ── Due date input (extracts day number) ─────────────────────────────────────
 document.querySelectorAll<HTMLInputElement>('.due-date-input').forEach(inp => {
   inp.addEventListener('change', async () => {
+    const prev = inp.value;
     const day = inp.value ? new Date(inp.value + 'T12:00:00').getDate() : null;
-    await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,due_day:day}).catch(()=>{});
+    try {
+      await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,due_day:day});
+    } catch (err) {
+      inp.value = prev;
+      showSaveError(err, 'the due date');
+    }
   });
 });
 
@@ -229,7 +271,12 @@ document.querySelectorAll<HTMLInputElement>('.due-date-input').forEach(inp => {
 document.querySelectorAll<HTMLButtonElement>('.toggle-cc').forEach(btn => {
   btn.addEventListener('click', async () => {
     const id = btn.dataset.id!; const isCC = btn.dataset.cc === '1'; const newCC = !isCC;
-    await api('/api/budget/recurring','PATCH',{id,is_cc_default:newCC?1:0}).catch(()=>{});
+    try {
+      await api('/api/budget/recurring','PATCH',{id,is_cc_default:newCC?1:0});
+    } catch (err) {
+      showSaveError(err, 'the payment type');
+      return;
+    }
     btn.dataset.cc = newCC?'1':'0';
     btn.textContent = newCC?'Credit Card':'Checking';
   });
@@ -238,7 +285,14 @@ document.querySelectorAll<HTMLButtonElement>('.toggle-cc').forEach(btn => {
 // ── Entity select ────────────────────────────────────────────────────────────
 document.querySelectorAll<HTMLSelectElement>('.entity-select').forEach(sel => {
   sel.addEventListener('change', async () => {
-    await api('/api/budget/recurring','PATCH',{id:sel.dataset.id!,entity_id:sel.value}).catch(()=>{});
+    const prev = sel.dataset.prev ?? sel.value;
+    try {
+      await api('/api/budget/recurring','PATCH',{id:sel.dataset.id!,entity_id:sel.value});
+      sel.dataset.prev = sel.value;
+    } catch (err) {
+      sel.value = prev;
+      showSaveError(err, 'the owner');
+    }
   });
 });
 
@@ -246,8 +300,14 @@ document.querySelectorAll<HTMLSelectElement>('.entity-select').forEach(sel => {
 document.querySelectorAll<HTMLInputElement>('.start-month-input, .end-month-input').forEach(inp => {
   const field = inp.classList.contains('start-month-input') ? 'start_month' : 'end_month';
   inp.addEventListener('change', async () => {
+    const prev = inp.value;
     const ym = inp.value ? inp.value.slice(0, 7) : null; // extract YYYY-MM
-    await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,[field]:ym}).catch(()=>{});
+    try {
+      await api('/api/budget/recurring','PATCH',{id:inp.dataset.id!,[field]:ym});
+    } catch (err) {
+      inp.value = prev;
+      showSaveError(err, field === 'start_month' ? 'the start date' : 'the end date');
+    }
   });
 });
 
@@ -261,16 +321,16 @@ document.querySelectorAll<HTMLButtonElement>('.propagate-btn').forEach(btn => {
     const start = startInput?.value?.slice(0, 7);
     const end   = endInput?.value?.slice(0, 7) || new Date().toISOString().slice(0, 7);
     if (!start) {
-      alert('Set a Start Date first, then click Propagate.');
+      showError('Set a Start Date first, then click Propagate.');
       return;
     }
-    if (start > end) { alert('Start date must be before end date.'); return; }
+    if (start > end) { showError('Start date must be before end date.'); return; }
     btn.disabled = true; btn.textContent = '…';
     try {
       const res = await api('/api/budget/propagate','POST',{bill_id:id,start_month:start,end_month:end}) as {months_created:number};
       btn.textContent = `✓ ${res.months_created} months`;
       setTimeout(()=>{ btn.textContent='Propagate'; btn.disabled=false; }, 3000);
-    } catch(e) { alert(String(e)); btn.textContent='Propagate'; btn.disabled=false; }
+    } catch(err) { showSaveError(err, 'the payment records'); btn.textContent='Propagate'; btn.disabled=false; }
   });
 });
 
@@ -280,7 +340,13 @@ document.querySelectorAll<HTMLButtonElement>('.delete-btn').forEach(btn => {
     if (!confirm('Delete this recurring item and all its payment records?')) return;
     const id  = btn.dataset.id!;
     const row = btn.closest('tr') as HTMLElement;
-    await fetch(`/api/budget/recurring?id=${id}`,{method:'DELETE'}).catch(()=>null);
+    try {
+      const r = await fetch(`/api/budget/recurring?id=${id}`,{method:'DELETE'});
+      if (!r.ok) throw new Error();
+    } catch {
+      showError('Could not delete the item — nothing was removed.');
+      return;
+    }
     row.remove();
   });
 });
@@ -321,17 +387,31 @@ document.getElementById('add-recurring-form')?.addEventListener('submit', async 
     form.reset();
     // Re-bind events on new row (simplified - reload for full functionality)
     tr.querySelector('.propagate-btn')?.addEventListener('click', async () => {
+      const btn = tr.querySelector<HTMLButtonElement>('.propagate-btn')!;
       const start = (tr.querySelector('.start-month-input') as HTMLInputElement)?.value?.slice(0,7);
       const end   = (tr.querySelector('.end-month-input')   as HTMLInputElement)?.value?.slice(0,7);
-      if (!start||!end) { alert('Set start and end dates first.'); return; }
-      const r = await api('/api/budget/propagate','POST',{bill_id:res.id,start_month:start,end_month:end}) as {months_created:number};
-      alert(`✓ Created records for ${r.months_created} months.`);
+      if (!start||!end) { showError('Set start and end dates first.'); return; }
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const r = await api('/api/budget/propagate','POST',{bill_id:res.id,start_month:start,end_month:end}) as {months_created:number};
+        btn.textContent = `✓ ${r.months_created} months`;
+        setTimeout(()=>{ btn.textContent='Propagate'; btn.disabled=false; }, 3000);
+      } catch (err) {
+        btn.textContent='Propagate'; btn.disabled=false;
+        showSaveError(err, 'the payment records');
+      }
     });
     tr.querySelector('.delete-btn')?.addEventListener('click', async () => {
       if (!confirm('Delete?')) return;
-      await fetch(`/api/budget/recurring?id=${res.id}`,{method:'DELETE'});
+      try {
+        const r = await fetch(`/api/budget/recurring?id=${res.id}`,{method:'DELETE'});
+        if (!r.ok) throw new Error();
+      } catch {
+        showError('Could not delete the item — nothing was removed.');
+        return;
+      }
       tr.remove();
     });
-  } catch(err) { alert(String(err)); }
+  } catch(err) { showSaveError(err, 'the recurring item'); }
 });
 </script>

@@ -842,6 +842,28 @@ async function api(url: string, method: string, body: object) {
   return r.json();
 }
 
+let toastTimer: ReturnType<typeof setTimeout> | undefined;
+function showError(msg: string) {
+  let toast = document.getElementById('save-error-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'save-error-toast';
+    toast.setAttribute('role', 'alert');
+    toast.className = 'fixed bottom-20 sm:bottom-6 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast!.style.opacity = '0'; }, 5000);
+}
+
+function showSaveError(err: unknown, what: string) {
+  const detail = err instanceof Error && err.message &&
+    !/^(Error|Failed to fetch|NetworkError|Load failed)$/i.test(err.message) ? err.message : null;
+  showError(detail ? `Could not save ${what} — ${detail}` : `Could not save ${what}. Check your connection and try again.`);
+}
+
 // ── Recompute CC remaining from DOM ──────────────────────────────────────────
 // Budget bar tracks ambient (variable) only. Big purchases shown separately in gray.
 function recomputeCC() {
@@ -976,9 +998,10 @@ document.getElementById('cc-use-projection-btn')?.addEventListener('click', asyn
     recomputeCC();
     btn.textContent = '✓ Applied';
     setTimeout(() => { btn.textContent = 'Use as budget'; btn.disabled = false; }, 2000);
-  } catch {
+  } catch (err) {
     btn.textContent = 'Use as budget';
     btn.disabled = false;
+    showSaveError(err, 'the budget for next month');
   }
 });
 
@@ -1058,7 +1081,9 @@ document.getElementById('recurring-mode-toggle')?.addEventListener('click', () =
   }
 
   // Persist the chosen mode so it survives page reload
-  api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${MONTH}`, value: mode }).catch(() => {});
+  api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${MONTH}`, value: mode }).catch(() => {
+    showError('Mode preference could not be saved — it will reset when the page reloads.');
+  });
 });
 
 // ── CC recurring sub unskip ───────────────────────────────────────────────────
@@ -1068,7 +1093,7 @@ document.getElementById('cc-bills')?.addEventListener('click', async e => {
   try {
     await api('/api/budget/bill-skip', 'POST', { month: btn.dataset.month!, bill_id: btn.dataset.billId!, skip: false });
     window.location.reload();
-  } catch { alert('Could not unskip subscription.'); }
+  } catch { showError('Could not unskip the subscription.'); }
 });
 
 // ── CC recurring sub skip ─────────────────────────────────────────────────────
@@ -1111,7 +1136,7 @@ document.getElementById('cc-bills')?.addEventListener('click', async e => {
     // Cascade to cash flow
     recalcCashFlow(recurVal);
   } catch (err) {
-    alert('Could not skip subscription.');
+    showError('Could not skip the subscription.');
   }
 });
 
@@ -1135,7 +1160,19 @@ document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el =>
       inp.replaceWith(el);
       if (!isNaN(v) && v !== cur) {
         const fullValue = v + recurringOffset;
-        await api('/api/budget/summary','POST',{month:fieldMonth,cc_budget:fullValue}).catch(()=>{});
+        try {
+          await api('/api/budget/summary','POST',{month:fieldMonth,cc_budget:fullValue});
+        } catch (err) {
+          el.textContent = usd(cur);
+          showSaveError(err, 'the CC budget');
+          recomputeCC();
+          const sec = document.getElementById('cc-recurring-section') as HTMLElement;
+          if (sec) {
+            sec.dataset.ccVariableBudget = String(cur + recurringOffset);
+            recalcCashFlow(parseFloat(sec.dataset.paymentRecurring ?? '0'));
+          }
+          return;
+        }
         // If this is the spending budget (next month), update the bar too
         if (el.id === 'cc-budget-display') {
           el.dataset.recurring = el.dataset.recurring ?? '0';
@@ -1144,7 +1181,7 @@ document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el =>
         // If this is the Variable+Big line, recalc cash flow
         const sec = document.getElementById('cc-recurring-section') as HTMLElement;
         if (sec) {
-          sec.dataset.ccVariableBudget = String(isNaN(v) ? cur + recurringOffset : fullValue);
+          sec.dataset.ccVariableBudget = String(fullValue);
           // CC Payment's recurring = last billing cycle (paid this month), independent of the display toggle.
           const paymentRecurring = parseFloat(sec.dataset.paymentRecurring ?? '0');
           recalcCashFlow(paymentRecurring);
@@ -1171,13 +1208,14 @@ document.querySelectorAll<HTMLElement>('.var-spend-amount').forEach(el => {
       el.textContent = isNaN(v) ? usd(cur) : usd(v);
       inp.replaceWith(el);
       if (!isNaN(v)) {
-        await fetch('/api/budget/cc-variable', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({month, card, amount: v}),
-        }).catch(()=>{});
-        recomputeCC();
-        
+        try {
+          await api('/api/budget/cc-variable','POST',{month, card, amount: v});
+          recomputeCC();
+        } catch (err) {
+          el.textContent = usd(cur);
+          recomputeCC();
+          showSaveError(err, 'the card spend total');
+        }
       }
     }
     inp.addEventListener('blur', save);
@@ -1203,8 +1241,15 @@ function bindInlineEdit(el: HTMLElement) {
       inp.replaceWith(el);
       if (!isNaN(v) && v !== cur) {
         if (el.dataset.propagatable) showPropagateBtn(el, field, v);
-        await api(endpoint,'POST',{month:MONTH,[field]:v}).catch(()=>{});
-        recomputeCC();
+        try {
+          await api(endpoint,'POST',{month:MONTH,[field]:v});
+          recomputeCC();
+        } catch (err) {
+          el.textContent = usd(cur);
+          el.parentElement?.querySelector('.propagate-btn')?.remove();
+          recomputeCC();
+          showSaveError(err, field.replace(/_/g, ' '));
+        }
       }
     }
     inp.addEventListener('blur', save);
@@ -1257,12 +1302,23 @@ document.querySelectorAll<HTMLElement>('.savings-allocation-edit').forEach(el =>
     inp.className = 'w-28 rounded border border-brand-green bg-white px-2 py-0.5 text-sm tabular-nums focus:outline-none';
     el.replaceWith(inp); inp.focus(); inp.select();
     async function save() {
-      const v = parseFloat(inp.value) || 0;
+      const v = parseFloat(inp.value);
+      if (isNaN(v)) { el.textContent = usd(cur); inp.replaceWith(el); return; }
       el.textContent = usd(v);
       inp.replaceWith(el);
       // Save savings_after = savings_start + allocation
       const newSavingsAfter = savingsStart + v;
-      await api('/api/budget/summary', 'POST', { month: MONTH, savings_after: newSavingsAfter }).catch(() => {});
+      try {
+        await api('/api/budget/summary', 'POST', { month: MONTH, savings_after: newSavingsAfter });
+      } catch (err) {
+        el.textContent = usd(cur);
+        const savEndEl = document.getElementById('savings-end-val');
+        if (savEndEl) savEndEl.textContent = usd(savingsStart + cur);
+        const deductEl = document.getElementById('checking-savings-deduct');
+        if (deductEl) deductEl.textContent = '-' + usd(cur);
+        showSaveError(err, 'the savings transfer');
+        return;
+      }
       // Update DOM: savings end
       const savEndEl = document.getElementById('savings-end-val');
       if (savEndEl) savEndEl.textContent = usd(newSavingsAfter);
@@ -1304,8 +1360,15 @@ document.querySelectorAll<HTMLElement>('.editable-bill-amount').forEach(el => {
       inp.replaceWith(el);
       if (!isNaN(v)) {
         if (v !== cur) showPropagateBtn(el, '__bill__', v, billId);
-        await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC}).catch(()=>{});
-        recomputeCC();
+        try {
+          await api('/api/budget/bill-payment','POST',{month:el.dataset.month ?? MONTH,bill_id:billId,amount:v,is_paid:isPaid,is_cc:isCC});
+          recomputeCC();
+        } catch (err) {
+          el.textContent = usd(cur);
+          el.parentElement?.querySelector('.propagate-btn')?.remove();
+          recomputeCC();
+          showSaveError(err, 'the bill amount');
+        }
       }
     }
     inp.addEventListener('blur',save);
@@ -1326,7 +1389,7 @@ document.querySelectorAll<HTMLInputElement>('.bill-toggle').forEach(cb => {
     // Clear auto indicator
     cb.dataset.isAuto = '0';
     try { await api('/api/budget/bill-payment','POST',{month:cb.dataset.month ?? MONTH,bill_id:billId,amount:amt,is_paid:isPaid,is_cc:isCC}); }
-    catch { cb.checked = !isPaid; }
+    catch { cb.checked = !isPaid; showError('Could not update the bill — nothing was saved.'); }
     recomputeCC();
     
   });
@@ -1344,9 +1407,17 @@ function bindSettingEdit(selector: string, field: string) {
       el.replaceWith(inp); inp.focus(); inp.select();
       async function save() {
         const v = parseInt(inp.value);
-        el.textContent = isNaN(v) ? String(cur)+'th' : v+'th'+(field==='payment_day'?' of next mo':'');
+        const suffix = field === 'payment_day' ? ' of next mo' : '';
+        el.textContent = isNaN(v) ? String(cur)+'th' : v+'th'+suffix;
         inp.replaceWith(el);
-        if (!isNaN(v)) await api('/api/budget/cc-settings','POST',{card,[field]:v}).catch(()=>{});
+        if (!isNaN(v)) {
+          try {
+            await api('/api/budget/cc-settings','POST',{card,[field]:v});
+          } catch (err) {
+            el.textContent = String(cur)+'th'+suffix;
+            showSaveError(err, field === 'payment_day' ? 'the payment day' : 'the billing end day');
+          }
+        }
       }
       inp.addEventListener('blur',save);
       inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape'){inp.replaceWith(el);} });
@@ -1369,9 +1440,18 @@ document.querySelectorAll<HTMLElement>('.editable-cc-desc, .editable-cc-amount')
     el.replaceWith(inp); inp.focus(); if(isAmt) inp.select();
     async function save() {
       const v = isAmt ? parseFloat(inp.value) : inp.value.trim();
+      const ok = isAmt ? !isNaN(Number(v)) : Boolean(v);
+      if (!ok) { el.textContent = isAmt ? usd(cur as number) : String(cur); inp.replaceWith(el); return; }
       el.textContent = isAmt ? usd(Number(v)) : String(v);
       inp.replaceWith(el);
-      if(v || v===0) { await api('/api/budget/cc-charge','PATCH',{id,[isAmt?'amount':'description']:v}).catch(()=>{}); if(isAmt) recomputeCC(); }
+      try {
+        await api('/api/budget/cc-charge','PATCH',{id,[isAmt?'amount':'description']:v});
+        if (isAmt) recomputeCC();
+      } catch (err) {
+        el.textContent = isAmt ? usd(cur as number) : String(cur);
+        if (isAmt) recomputeCC();
+        showSaveError(err, isAmt ? 'the charge amount' : 'the charge description');
+      }
     }
     inp.addEventListener('blur',save);
     inp.addEventListener('keydown', e => { if(e.key==='Enter')save(); if(e.key==='Escape')inp.replaceWith(el); });
@@ -1380,15 +1460,31 @@ document.querySelectorAll<HTMLElement>('.editable-cc-desc, .editable-cc-amount')
 
 // ── CC card select ────────────────────────────────────────────────────────────
 document.querySelectorAll<HTMLSelectElement>('.cc-card-select').forEach(sel => {
+  sel.dataset.prev = sel.value;
   sel.addEventListener('change', async () => {
-    await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,card:sel.value}).catch(()=>{});
+    try {
+      await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,card:sel.value});
+      sel.dataset.prev = sel.value;
+    } catch (err) {
+      sel.value = sel.dataset.prev ?? sel.value;
+      showSaveError(err, 'the card assignment');
+    }
   });
 });
 
 // ── CC category select (big purchases) ───────────────────────────────────────
 document.querySelectorAll<HTMLSelectElement>('.cc-category-select').forEach(sel => {
+  sel.dataset.prev = sel.value;
   sel.addEventListener('change', async () => {
-    await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,category_id:sel.value||null}).catch(()=>{});
+    try {
+      await api('/api/budget/cc-charge','PATCH',{id:sel.dataset.id!,category_id:sel.value||null});
+    } catch (err) {
+      sel.value = sel.dataset.prev ?? sel.value;
+      sel.style.color = sel.value ? (BIG_CAT_COLORS[sel.value]??'#a8a29e') : '#a8a29e';
+      showSaveError(err, 'the charge category');
+      return;
+    }
+    sel.dataset.prev = sel.value;
     sel.style.color = sel.value ? (BIG_CAT_COLORS[sel.value]??'#a8a29e') : '#a8a29e';
   });
 });
@@ -1407,7 +1503,7 @@ document.querySelectorAll<HTMLButtonElement>('.cc-toggle-big').forEach(btn => {
       // Refresh the group label on the row
       const bigTag = btn.closest('[data-cc-id]')?.querySelector('.rounded.border');
       recomputeCC();
-    } catch { alert('Update failed'); }
+    } catch { showError('Update failed — the charge is unchanged.'); }
   });
 });
 
@@ -1427,7 +1523,7 @@ document.querySelectorAll<HTMLButtonElement>('.cc-toggle-estimated').forEach(btn
       badge?.remove();
       btn.remove();
       recomputeCC();
-    } catch { alert('Update failed'); }
+    } catch { showError('Update failed — the charge is unchanged.'); }
   });
 });
 
@@ -1436,7 +1532,13 @@ document.querySelectorAll<HTMLButtonElement>('.delete-cc-charge').forEach(btn =>
   btn.addEventListener('click', async () => {
     const id  = btn.dataset.id!;
     const row = btn.closest('[data-cc-id]') as HTMLElement;
-    await fetch(`/api/budget/cc-charge?id=${id}`,{method:'DELETE'}).catch(()=>null);
+    try {
+      const r = await fetch(`/api/budget/cc-charge?id=${id}`,{method:'DELETE'});
+      if (!r.ok) throw new Error();
+    } catch {
+      showError('Could not delete the charge — it is still in the list.');
+      return;
+    }
     row.remove();
     // Remove group card if empty
     const group = row.closest('.rounded-lg.border');
@@ -1530,17 +1632,31 @@ addBigForm?.addEventListener('submit', async e => {
     if (tot) { const c=parseFloat(tot.textContent!.replace(/[$,]/g,''))||0; tot.textContent=usd(c+amount); }
     row.querySelector<HTMLSelectElement>('.cc-category-select')?.addEventListener('change', async (ev) => {
       const sel = ev.target as HTMLSelectElement;
-      await api('/api/budget/cc-charge','PATCH',{id:res.id,category_id:sel.value||null}).catch(()=>{});
+      const prev = sel.value;
+      try {
+        await api('/api/budget/cc-charge','PATCH',{id:res.id,category_id:sel.value||null});
+      } catch (err) {
+        sel.value = prev;
+        sel.style.color = prev ? (BIG_CAT_COLORS[prev]??'#a8a29e') : '#a8a29e';
+        showSaveError(err, 'the charge category');
+        return;
+      }
       sel.style.color = sel.value ? (BIG_CAT_COLORS[sel.value]??'#a8a29e') : '#a8a29e';
     });
     row.querySelector('.delete-cc-charge')?.addEventListener('click', async () => {
-      await fetch(`/api/budget/cc-charge?id=${res.id}`,{method:'DELETE'});
+      try {
+        const r = await fetch(`/api/budget/cc-charge?id=${res.id}`,{method:'DELETE'});
+        if (!r.ok) throw new Error();
+      } catch {
+        showError('Could not delete the charge — it is still in the list.');
+        return;
+      }
       row.remove();
       if (!groupEl!.querySelectorAll('[data-cc-id]').length) groupEl!.remove();
       recomputeCC();
     });
     addBigForm.reset(); recomputeCC();
-  } catch(err){alert(String(err));}
+  } catch(err){ showSaveError(err, 'the cash entry'); }
 });
 
 // ── Skip bill for this month ──────────────────────────────────────────────────
@@ -1549,15 +1665,12 @@ document.querySelectorAll<HTMLButtonElement>('.skip-bill').forEach(btn => {
     const billId = btn.dataset.bill!;
     const month  = btn.dataset.month!;
     if (!confirm('Skip this bill for this month only?')) return;
-    await fetch('/api/budget/bill-skip', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ month, bill_id: billId, skip: true }),
-    });
-    const row = btn.closest('[data-bill-id]') as HTMLElement;
-    row?.remove();
-    // Refresh the page so totals recalculate
-    window.location.reload();
+    try {
+      await api('/api/budget/bill-skip', 'POST', { month, bill_id: billId, skip: true });
+      window.location.reload();
+    } catch (err) {
+      showSaveError(err, 'the skip');
+    }
   });
 });
 
@@ -1567,7 +1680,7 @@ document.querySelectorAll<HTMLButtonElement>('.unskip-bill').forEach(btn => {
     try {
       await api('/api/budget/bill-skip', 'POST', { month: btn.dataset.month!, bill_id: btn.dataset.bill!, skip: false });
       window.location.reload();
-    } catch { alert('Could not unskip bill.'); }
+    } catch { showError('Could not unskip the bill — it is still marked skipped.'); }
   });
 });
 
@@ -1575,7 +1688,8 @@ document.querySelectorAll<HTMLButtonElement>('.unskip-bill').forEach(btn => {
 document.querySelectorAll<HTMLButtonElement>('.delete-cash').forEach(btn => {
   btn.addEventListener('click', async () => {
     const id=btn.dataset.id!, row=btn.closest('[data-cash-id]') as HTMLElement;
-    await fetch(`/api/budget/cash-expense?id=${id}`,{method:'DELETE'});
+    const r = await fetch(`/api/budget/cash-expense?id=${id}`,{method:'DELETE'});
+    if (!r.ok) { showError('Could not delete the entry — nothing was removed.'); return; }
 row.remove();
       
     });
@@ -1608,10 +1722,19 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
         <button class="delete-cash opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-400 hover:text-brand-red text-xs px-1" data-id="${res.id}">✕</button>
       `;
       list.appendChild(row);
-      row.querySelector('.delete-cash')?.addEventListener('click',async()=>{await fetch(`/api/budget/cash-expense?id=${res.id}`,{method:'DELETE'});row.remove();});
+      row.querySelector('.delete-cash')?.addEventListener('click',async()=>{
+        try {
+          const r = await fetch(`/api/budget/cash-expense?id=${res.id}`,{method:'DELETE'});
+          if (!r.ok) throw new Error();
+        } catch {
+          showError('Could not delete the entry — nothing was removed.');
+          return;
+        }
+        row.remove();
+      });
       form.reset();
       
-    } catch(err){alert(String(err));}
+  } catch(err){ showSaveError(err, 'the big purchase'); }
   });
 });
 
@@ -1656,22 +1779,36 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
       // Phase 2: apply all previewed matches
       btn.disabled = true;
       btn.textContent = 'Applying…';
-      const hints = document.querySelectorAll<HTMLElement>('.match-hint[data-amount]');
+      const hintEls = Array.from(document.querySelectorAll<HTMLElement>('.match-hint[data-amount]'));
+      const targets: HTMLElement[] = [];
       const posts: Promise<unknown>[] = [];
-      hints.forEach(hint => {
+      hintEls.forEach(hint => {
         const billId = hint.dataset.billMatch!;
         const amount = parseFloat(hint.dataset.amount!);
         if (isNaN(amount)) return;
+        targets.push(hint);
         posts.push(
           fetch('/api/budget/bill-payment', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             credentials: 'same-origin',
             body: JSON.stringify({ month: paymentMonth, bill_id: billId, amount, is_paid: true, is_cc: true }),
-          })
+          }).then(r => { if (!r.ok) throw new Error(); })
         );
       });
-      await Promise.all(posts).catch(() => {});
+      const results = await Promise.allSettled(posts);
+      const failedIdx: number[] = [];
+      results.forEach((r, i) => { if (r.status === 'rejected') failedIdx.push(i); });
+      if (failedIdx.length > 0) {
+        targets.forEach((hint, i) => {
+          if (!failedIdx.includes(i)) hint.removeAttribute('data-amount');
+        });
+        const failed = failedIdx.length;
+        btn.disabled = false;
+        btn.textContent = `Apply ${failed} remaining`;
+        showError(`${posts.length - failed} of ${posts.length} payments saved, ${failed} failed. Click again to retry the failed ones.`);
+        return;
+      }
       location.reload();
       return;
     }
@@ -1703,6 +1840,7 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
     } catch {
       btn.textContent = 'Reconcile';
       btn.disabled = false;
+      showError('Could not fetch matches — try again.');
     }
   });
 })();
