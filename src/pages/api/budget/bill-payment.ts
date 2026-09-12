@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { recomputeMonth } from '../../../lib/recompute';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -53,6 +54,7 @@ export async function POST(context: APIContext): Promise<Response> {
         });
       }
     }
+    await recomputeMonth(client, month);
     return json({ ok: true });
   } finally { client.close(); }
 }

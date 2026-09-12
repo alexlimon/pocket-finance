@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { recomputeMonth } from '../../../lib/recompute';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
@@ -21,6 +22,7 @@ export async function POST(context: APIContext): Promise<Response> {
       sql: `INSERT INTO cash_expenses (id, month, date, description, amount, type, entity_id) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       args: [id, month, date ?? null, description, amount, type, entity_id],
     });
+    await recomputeMonth(client, month);
     return json({ ok: true, id }, 201);
   } finally { client.close(); }
 }
@@ -34,7 +36,9 @@ export async function DELETE(context: APIContext): Promise<Response> {
 
   const client = getClient(env);
   try {
+    const row = await client.execute({ sql: 'SELECT month FROM cash_expenses WHERE id = ? LIMIT 1', args: [id] });
     await client.execute({ sql: 'DELETE FROM cash_expenses WHERE id = ?', args: [id] });
+    if (row.rows.length) await recomputeMonth(client, String(row.rows[0].month));
     return json({ ok: true });
   } finally { client.close(); }
 }
