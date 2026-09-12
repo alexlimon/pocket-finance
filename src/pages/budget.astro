@@ -54,9 +54,10 @@ const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_d
 let savedRecurringMode: 'estimated' | 'actual' | null = null;
 let ccBudgetSummaries: { month: string; cc_budget: number }[] = [];
 let ccPaceMonthTotals: { month: string; total: number }[]    = [];
+let ccPaidMarkers: Set<string> = new Set();
 
 try {
-  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes] = await client.batch([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes] = await client.batch([
     { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] },
     { sql: BILLS_QUERY, args: [month, month, month] },
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -87,6 +88,8 @@ try {
     { sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
     // CC pace baseline — last 6 months of variable spend totals
     { sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
+    // "Statement already paid" markers (`cc_paid_<card>_<YYYY-MM>`)
+    { sql: `SELECT key FROM settings WHERE key LIKE 'cc_paid_%'`, args: [] },
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -124,6 +127,7 @@ try {
   nextBills         = resolveBillStatus(nextBillRes.rows as any[], isNow, todayDay, /* allowAuto */ false);
   ccBudgetSummaries = budgetBaselineRes.rows as unknown as typeof ccBudgetSummaries;
   ccPaceMonthTotals = paceBaselineRes.rows   as unknown as typeof ccPaceMonthTotals;
+  ccPaidMarkers     = new Set(paidMarkersRes.rows.map(r => String(r.key)));
 } finally { client.close(); }
 
 // ── Derived data ─────────────────────────────────────────────────────────────
@@ -174,6 +178,13 @@ const { ccBillsNextPayment, skippedCCBillsNextPayment, estimatedCCRecurring, act
 const ccBillsNextPaymentDisplay = sortBills([...ccBillsNextPayment, ...skippedCCBillsNextPayment]);
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
+const variablePaidMap   = new Map<string, string>();
+for (const key of ccPaidMarkers) {
+  const k = key.slice('cc_paid_'.length);   // `<card>_<YYYY-MM>`
+  const idx = k.lastIndexOf('_');
+  if (idx === -1) continue;
+  variablePaidMap.set(k.slice(0, idx), k.slice(idx + 1));
+}
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 
 // ── CC statement pacing ───────────────────────────────────────────────────────
@@ -514,6 +525,17 @@ const projection = projectCCSpend({
               <span class="synced-time text-xs text-stone-400 px-2" title="Balance last updated by bank" data-ts={variableUpdatedAt.get(s.card)}>
                 synced …
               </span>
+            )}
+            {isNow && (
+              <button
+                class={`cc-mark-paid rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-40 ${
+                  variablePaidMap.get(s.card)
+                    ? 'border-brand-green bg-brand-green/10 text-brand-green'
+                    : 'border-surface-border text-stone-400 hover:border-brand-green hover:text-brand-green'
+                }`}
+                data-card={s.card} data-month={month}
+                title="Mark this statement as paid — the remaining balance stops being subtracted from this cycle"
+              >{variablePaidMap.get(s.card) ? '✓ paid' : 'Mark paid'}</button>
             )}
           </div>
           <span class="text-xs text-stone-400 flex-1">paying {payLabel}</span>
@@ -1766,6 +1788,22 @@ document.getElementById('cc-sync-now-btn')?.addEventListener('click', async () =
   }
 });
 
+// ── Mark a card's statement as already paid ──────────────────────────────────
+document.querySelectorAll<HTMLButtonElement>('.cc-mark-paid').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const card  = btn.dataset.card!;
+    const month = btn.dataset.month!;
+    const wasPaid = btn.classList.contains('border-brand-green');
+    btn.disabled = true;
+    try {
+      await api('/api/budget/cc-payment-made', 'POST', { card, month, paid: !wasPaid });
+      location.reload();
+    } catch (err) {
+      btn.disabled = false;
+      showSaveError(err, 'the payment marker');
+    }
+  });
+});
 
 // ── CC Reconcile ──────────────────────────────────────────────────────────────
 (function () {
