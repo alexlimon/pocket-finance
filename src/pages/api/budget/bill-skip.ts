@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { recomputeMonth } from '../../../lib/recompute';
 
 // POST { month, bill_id, skip: true|false }
 export async function POST(context: APIContext): Promise<Response> {
@@ -24,6 +25,7 @@ export async function POST(context: APIContext): Promise<Response> {
             ON CONFLICT(month, bill_id) DO UPDATE SET is_skipped = excluded.is_skipped`,
       args: [id, month, bill_id, skip ? 1 : 0],
     });
+    await recomputeMonth(client, month);
     return json({ ok: true });
   } finally { client.close(); }
 }

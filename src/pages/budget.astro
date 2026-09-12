@@ -3,7 +3,6 @@ import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
-import { syncCCSpend } from '../lib/plaid-sync';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
@@ -13,8 +12,6 @@ import { computeCCBudgetBaseline, computeCCPaceBaseline, projectCCSpend } from '
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
-
-try { await syncCCSpend(env); } catch { /* non-fatal — page renders with cached data if Plaid is unavailable */ }
 
 const month    = Astro.url.searchParams.get('month') ?? currentMonth();
 const prev     = prevMonth(month);
@@ -655,6 +652,10 @@ const projection = projectCCSpend({
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Recurring Subscriptions</h2>
     <div class="flex items-center gap-3 text-xs">
+      <button id="cc-sync-now-btn"
+        class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
+        title="Re-sync CC spend from Plaid"
+      >⟳ Sync</button>
       <button id="cc-reconcile-btn"
         class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
         data-month={next}
@@ -1045,9 +1046,6 @@ function recalcCashFlow(recurringVal: number) {
   if (netEl2) netEl2.className = netEl2.className.replace(/text-brand-\w+/g, '') + (net >= 0 ? ' text-brand-green' : ' text-brand-red');
   const checkEndEl = document.getElementById('checking-end-val');
   if (checkEndEl) checkEndEl.className = checkEndEl.className.replace(/text-brand-red|text-stone-800/g, '') + (checkEnd >= 0 ? ' text-stone-800' : ' text-brand-red');
-  
-  // Save checking_after to database
-  api('/api/budget/summary', 'POST', { month: MONTH, checking_after: checkEnd }).catch(() => {});
 }
 
 
@@ -1330,8 +1328,6 @@ document.querySelectorAll<HTMLElement>('.savings-allocation-edit').forEach(el =>
       const newCheckEnd = checkStart + netVal - v;
       const checkEndEl = document.getElementById('checking-end-val');
       if (checkEndEl) { checkEndEl.textContent = usd(newCheckEnd); checkEndEl.className = checkEndEl.className.replace(/text-brand-\w+|text-stone-800/g, '') + (newCheckEnd >= 0 ? ' text-stone-800' : ' text-brand-red'); }
-      // Also save checking_after
-      await api('/api/budget/summary', 'POST', { month: MONTH, checking_after: newCheckEnd }).catch(() => {});
       // Update deduction display
       const deductEl = document.getElementById('checking-savings-deduct');
       if (deductEl) deductEl.textContent = '-' + usd(v);
@@ -1738,17 +1734,6 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
   });
 });
 
-// Save computed checking_end to DB on page load so next month can use it as checking_before
-(function() {
-  const checkEndEl = document.getElementById('checking-end-val');
-  if (checkEndEl) {
-    const checkEnd = parseFloat(checkEndEl.textContent!.replace(/[$,]/g,'') ?? '0');
-    if (!isNaN(checkEnd)) {
-      api('/api/budget/summary', 'POST', { month: MONTH, checking_after: checkEnd }).catch(() => {});
-    }
-  }
-})();
-
 // Swipe left/right to navigate months
 (function() {
   const [y, m] = MONTH.split('-').map(Number);
@@ -1767,6 +1752,20 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
     window.location.href = dx < 0 ? `/budget?month=${NEXT}` : `/budget?month=${PREV}`;
   }, { passive: true });
 })();
+
+// ── Sync CC spend from Plaid on demand ──────────────────────────────────────
+document.getElementById('cc-sync-now-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('cc-sync-now-btn') as HTMLButtonElement;
+  btn.disabled = true;
+  try {
+    await api('/api/plaid/sync', 'POST', {});
+    location.reload();
+  } catch (err) {
+    btn.disabled = false;
+    showSaveError(err, 'the CC spend sync');
+  }
+});
+
 
 // ── CC Reconcile ──────────────────────────────────────────────────────────────
 (function () {

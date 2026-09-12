@@ -2,6 +2,7 @@ import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
 import { CC_BUDGET_LATCH_PREFIX } from '../../../lib/budget';
+import { recomputeMonths } from '../../../lib/recompute';
 
 const ALLOWED = new Set(['income_alex', 'income_maham', 'cc_budget']);
 
@@ -40,6 +41,12 @@ export async function POST(context: APIContext): Promise<Response> {
         args: [from_month],
       });
     }
+
+    const touched = await client.execute({
+      sql:  'SELECT month FROM monthly_summary WHERE month > ? ORDER BY month',
+      args: [from_month],
+    });
+    await recomputeMonths(client, touched.rows.map(r => String(r.month)));
 
     return json({ ok: true, rows_updated: result.rowsAffected });
   } finally { client.close(); }

@@ -1,6 +1,7 @@
 import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
+import { recomputeMonths } from '../../../lib/recompute';
 
 /** Create bill_payment records for every month from start_month to end_month. */
 export async function POST(context: APIContext): Promise<Response> {
@@ -54,6 +55,8 @@ export async function POST(context: APIContext): Promise<Response> {
       });
       created++;
     }
+
+    await recomputeMonths(client, months);
 
     return json({ ok: true, months_created: created });
   } finally { client.close(); }

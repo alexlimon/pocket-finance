@@ -1,0 +1,10 @@
+name = "pocket-finance-cron"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Secrets (set once per project via `npx wrangler secret put <KEY>`):
+#   APP_URL    — the deployed site's origin, e.g. https://limetiramisu.pages.dev
+#   PF_API_KEY — a pocket-finance API key (generated via /api/llm/key)
+
+[triggers]
+crons = ["0 */6 * * *"]
