@@ -57,6 +57,7 @@ function computeSpendWrites(
   balanceUpdatedAt: string | null,
   existingAmount: number | null = null,
   prevMonthAmount: number | null = null,
+  paidAt: (month: string) => string | null = () => null,
 ): SpendWrites {
   const today      = new Date();
   const day        = today.getDate();
@@ -75,6 +76,12 @@ function computeSpendWrites(
     const settled       = prevMonthStatementBalance !== null
       ? (prevMonthAmount ?? prevMonthStatementBalance)
       : Math.round(current * 100) / 100;
+    // If the user already marked the previous statement paid, the bank balance
+    // no longer contains it — stop subtracting it and treat the whole balance
+    // as this cycle's spend.
+    if (paidAt(prevMonth)) {
+      return { entries: [{ month: thisMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
+    }
     const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
     return {
       entries: [
@@ -104,6 +111,15 @@ function computeSpendWrites(
   const settled       = existingStatementBalance !== null
     ? (existingAmount ?? existingStatementBalance)
     : Math.round(current * 100) / 100;
+  // If the user already marked this statement paid, skip the subtraction.
+  if (paidAt(thisMonth)) {
+    return {
+      entries: [
+        { month: thisMonth, amount: settled, statementBalance: settled, balanceUpdatedAt },
+        { month: nextMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt },
+      ],
+    };
+  }
   const postStatement = Math.max(0, Math.round((totalUsed - settled) * 100) / 100);
 
   return {
@@ -146,6 +162,19 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
         ? Number(r.amount) : null;
       if (String(r.month) === thisMonth)    { storedStatementBalances.set(String(r.card), sb);    storedAmounts.set(String(r.card), amt); }
       if (String(r.month) === prevMonthStr) { prevMonthStatementBalances.set(String(r.card), sb); prevMonthAmounts.set(String(r.card), amt); }
+    }
+
+    // Load "statement already paid" markers (`cc_paid_<card>_<YYYY-MM>` → timestamp).
+    const paidRes = await client.execute({
+      sql:  `SELECT key, value FROM settings WHERE key LIKE 'cc_paid_%'`,
+      args: [],
+    });
+    const paidMarkers = new Map<string, string>();
+    for (const r of paidRes.rows) {
+      const k = String(r.key).slice('cc_paid_'.length);           // `<card>_<YYYY-MM>`
+      const idx = k.lastIndexOf('_');
+      if (idx === -1) continue;
+      paidMarkers.set(`${k.slice(0, idx)}_${k.slice(idx + 1)}`, String(r.value));
     }
 
     const items = await client.execute({ sql: 'SELECT id, access_token, institution_name FROM plaid_items', args: [] });
@@ -198,6 +227,7 @@ export async function syncCCSpend(env: CloudflareEnv): Promise<void> {
           balanceUpdatedAt,
           existingAmt,
           prevAmt,
+          (month) => paidMarkers.get(`${mapping.card}_${month}`) ?? null,
         );
 
         for (const { month, amount, statementBalance, balanceUpdatedAt: bua } of entries) {
