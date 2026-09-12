@@ -178,13 +178,13 @@ const { ccBillsNextPayment, skippedCCBillsNextPayment, estimatedCCRecurring, act
 const ccBillsNextPaymentDisplay = sortBills([...ccBillsNextPayment, ...skippedCCBillsNextPayment]);
 const { otherCashIncomes, otherCashExpenses, otherCashIncomeTotal, otherCashExpenseTotal, totalFixedChecking, incomeTotal, netAmount } = cashFlow;
 const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_updated_at ?? r.updated_at]));
-const variablePaidMap   = new Map<string, string>();
-for (const key of ccPaidMarkers) {
-  const k = key.slice('cc_paid_'.length);   // `<card>_<YYYY-MM>`
-  const idx = k.lastIndexOf('_');
-  if (idx === -1) continue;
-  variablePaidMap.set(k.slice(0, idx), k.slice(idx + 1));
-}
+// "Statement already paid" markers are keyed by the BILLING month that closed,
+// as `<card>_<YYYY-MM>`. The Credit Card Payment row for month M settles the
+// statement that closed in M-1, so that row's toggle marks `prev` — not the
+// month being viewed. What is swiped this month is next month's payment and
+// must not touch this month's budget.
+const ccPaidKeys    = new Set([...ccPaidMarkers].map(k => k.slice('cc_paid_'.length)));
+const ccPaymentPaid = ccSettings.some(s => ccPaidKeys.has(`${s.card}_${prev}`));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 
 // ── CC statement pacing ───────────────────────────────────────────────────────
@@ -430,8 +430,19 @@ const projection = projectCCSpend({
     <!-- CC Payment line -->
     <div class="mt-2 border-t border-surface-border pt-2">
       <div class="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover">
-        <div class="min-w-0">
+        <div class="min-w-0 flex flex-wrap items-center gap-2">
           <span class="text-sm text-stone-600">Credit Card Payment</span>
+          {isNow && (
+            <button
+              class={`cc-mark-paid rounded-full border px-2.5 py-0.5 text-xs transition-colors disabled:opacity-40 ${
+                ccPaymentPaid
+                  ? 'border-brand-green bg-brand-green/10 text-brand-green'
+                  : 'border-surface-border text-stone-400 hover:border-brand-green hover:text-brand-green'
+              }`}
+              data-month={prev}
+              title={`Mark the ${monthLabel(prev)} statement as paid — its balance stops being subtracted from this cycle's spend`}
+            >{ccPaymentPaid ? '✓ paid' : 'Mark paid'}</button>
+          )}
         </div>
         <span class="tabular-nums text-sm text-stone-700 flex-shrink-0" id="fb-cc-payment">{fmt(ccPaymentAmount)}</span>
       </div>
@@ -494,7 +505,13 @@ const projection = projectCCSpend({
 <!-- CC Variable Spend (one row per card) -->
 <div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
   <div class="flex items-center justify-between mb-3">
-    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Variable Spend</h2>
+    <div class="flex items-center gap-2">
+      <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Variable Spend</h2>
+      <button id="cc-sync-now-btn"
+        class="rounded-full border border-surface-border px-2.5 py-0.5 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
+        title="Re-sync CC spend from Plaid"
+      >⟳ Sync</button>
+    </div>
     <a href="/connect" class="text-xs text-stone-400 hover:text-stone-500">Edit billing dates</a>
   </div>
   {plaidSyncError && (
@@ -525,17 +542,6 @@ const projection = projectCCSpend({
               <span class="synced-time text-xs text-stone-400 px-2" title="Balance last updated by bank" data-ts={variableUpdatedAt.get(s.card)}>
                 synced …
               </span>
-            )}
-            {isNow && (
-              <button
-                class={`cc-mark-paid rounded-full border px-2.5 py-1 text-xs transition-colors disabled:opacity-40 ${
-                  variablePaidMap.get(s.card)
-                    ? 'border-brand-green bg-brand-green/10 text-brand-green'
-                    : 'border-surface-border text-stone-400 hover:border-brand-green hover:text-brand-green'
-                }`}
-                data-card={s.card} data-month={month}
-                title="Mark this statement as paid — the remaining balance stops being subtracted from this cycle"
-              >{variablePaidMap.get(s.card) ? '✓ paid' : 'Mark paid'}</button>
             )}
           </div>
           <span class="text-xs text-stone-400 flex-1">paying {payLabel}</span>
@@ -674,10 +680,6 @@ const projection = projectCCSpend({
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">CC Recurring Subscriptions</h2>
     <div class="flex items-center gap-3 text-xs">
-      <button id="cc-sync-now-btn"
-        class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
-        title="Re-sync CC spend from Plaid"
-      >⟳ Sync</button>
       <button id="cc-reconcile-btn"
         class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
         data-month={next}
@@ -1791,12 +1793,12 @@ document.getElementById('cc-sync-now-btn')?.addEventListener('click', async () =
 // ── Mark a card's statement as already paid ──────────────────────────────────
 document.querySelectorAll<HTMLButtonElement>('.cc-mark-paid').forEach(btn => {
   btn.addEventListener('click', async () => {
-    const card  = btn.dataset.card!;
     const month = btn.dataset.month!;
     const wasPaid = btn.classList.contains('border-brand-green');
     btn.disabled = true;
     try {
-      await api('/api/budget/cc-payment-made', 'POST', { card, month, paid: !wasPaid });
+      // 'all' — the payment settles every card's statement for that billing month.
+      await api('/api/budget/cc-payment-made', 'POST', { card: 'all', month, paid: !wasPaid });
       location.reload();
     } catch (err) {
       btn.disabled = false;
