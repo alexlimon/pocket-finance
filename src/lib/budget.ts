@@ -164,6 +164,45 @@ export function statementWindow(billingMonth: string, billingEndDay: number): { 
   return { start: fmt(prev), end: fmt(end) };
 }
 
+/**
+ * `billing_end_day` is the LAST day of the cycle, INCLUSIVE: a charge dated on the
+ * cut-off day belongs to the statement closing that day. `computePaymentMonth`,
+ * `ccSubPaymentMonth` and `statementWindow` all read it that way, so anything
+ * deciding "has this statement closed yet" must use `day > billing_end_day` —
+ * never `>=`, which closes the cycle a day early and files that day's charges
+ * into the wrong statement.
+ */
+
+/**
+ * The cc month key of the billing cycle that is OPEN on `today`.
+ *
+ * Cycles are keyed by the month they close in, so cycle '2026-09' with a cut-off
+ * of the 18th spans Aug 19 → Sep 18. From the 19th onward the open cycle is keyed
+ * to next month — that is the window where the calendar axis (income, checking
+ * bills) and the statement axis (CC spend) disagree and the budget page has to
+ * show two different periods at once.
+ */
+export function openCycleMonth(today: Date, billingEndDay: number): string {
+  const m = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+  return today.getDate() > billingEndDay ? nextMonth(m) : m;
+}
+
+/** True once the cycle keyed `month` has closed (the cut-off day has fully passed). */
+export function isCycleClosed(month: string, billingEndDay: number, today: Date = new Date()): boolean {
+  return month < openCycleMonth(today, billingEndDay);
+}
+
+/** Human label for a cycle's span, e.g. 'Aug 19 – Sep 18'. */
+export function cycleRangeLabel(month: string, billingEndDay: number): string {
+  const { start, end } = statementWindow(month, billingEndDay);
+  const fmtDay = (iso: string) => {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d))
+      .toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  };
+  return `${fmtDay(start)} – ${fmtDay(end)}`;
+}
+
 export function ccSubPaymentMonth(
   dueDay: number | null,
   billingEndDay: number,
