@@ -69,10 +69,12 @@ function computeSpendWrites(
   const totalUsed  = Math.round((limit - available) * 100) / 100;
   const { billing_end_day, payment_day } = settings;
 
-  // Phase 2 carryover: before billing_end_day of current month AND before payment_day —
-  // the previous month's statement has closed but hasn't been paid yet.
+  // Phase 2 carryover: on or before billing_end_day of current month AND before
+  // payment_day — the previous month's statement has closed but hasn't been paid yet.
   // Example: billing_end_day=18, payment_day=15 → May 1–14 is still paying the April statement.
-  if (day < billing_end_day && day < payment_day) {
+  // billing_end_day is INCLUSIVE (see openCycleMonth in budget.ts), so the cycle is
+  // still open ON the cut-off day — `<=`, not `<`.
+  if (day <= billing_end_day && day < payment_day) {
     const settled       = prevMonthStatementBalance !== null
       ? (prevMonthAmount ?? prevMonthStatementBalance)
       : Math.round(current * 100) / 100;
@@ -91,8 +93,9 @@ function computeSpendWrites(
     };
   }
 
-  // Phase 1: before statement closes (and payment for prev statement already made)
-  if (day < billing_end_day) {
+  // Phase 1: statement still open (and payment for prev statement already made).
+  // Inclusive cut-off: a charge made ON billing_end_day belongs to this cycle.
+  if (day <= billing_end_day) {
     return { entries: [{ month: thisMonth, amount: totalUsed, statementBalance: null, balanceUpdatedAt }] };
   }
 

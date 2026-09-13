@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
-import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
+import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, openCycleMonth, cycleRangeLabel, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
@@ -22,6 +22,11 @@ const todayDay = new Date().getDate();
 
 const client = getClient(env);
 
+// cc_settings decides which billing cycle the CC section renders, so it has to be
+// resolved before the main batch can be parameterized. Three rows, one index hit.
+let ccSettings: { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
+let defaultBillingEndDay = 25;
+
 // ── Data defaults (overwritten by DB fetch below) ────────────────────────────
 let summary: MonthlySummary = {
   month, income_alex:0, income_maham:0, income_other:0,
@@ -32,7 +37,6 @@ let bills:            ResolvedBill[] = [];
 let nextBills:        ResolvedBill[] = [];
 let bigPurchases:     BigPurchase[]  = [];
 let cashExpenses:     CashExpense[]  = [];
-let ccSettings:       { card: string; display_name: string; billing_end_day: number; payment_day: number }[] = [];
 let variableSpendRows:{ card: string; amount: number; updated_at: string | null; balance_updated_at: string | null }[] = [];
 let nextMonthCCBudget: number | null = null;
 let plaidSyncError:   string | null   = null;
@@ -55,9 +59,37 @@ let savedRecurringMode: 'estimated' | 'actual' | null = null;
 let ccBudgetSummaries: { month: string; cc_budget: number }[] = [];
 let ccPaceMonthTotals: { month: string; total: number }[]    = [];
 let ccPaidMarkers: Set<string> = new Set();
+let ccCycleBudget: number | null = null;
+
+// ── Billing-cycle axis ───────────────────────────────────────────────────────
+// The page runs on two clocks. `month` is the CALENDAR month and drives income,
+// checking bills and balances. `ccCycle` is the CC STATEMENT cycle and drives
+// every CC card; it is keyed by the month the cycle closes in, so cycle '2026-09'
+// with an 18th cut-off spans Aug 19 → Sep 18.
+//
+// They agree for most of the month, then diverge: from the day after the cut-off
+// to month end the OPEN cycle is keyed to next month, which is why live CC spend
+// used to disappear from the current month's page. When that happens we default
+// the CC section to the open cycle and let `?cycle=` switch back to the closed one.
+let openCycle   = month;
+let ccCycle     = month;
+let ccCycleNext = next;
 
 try {
-  const [sumRes, billRes, bigPurchasesRes, cashRes, settingsRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes] = await client.batch([
+  const preSettingsRes = await client.execute({
+    sql: "SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card", args: [],
+  });
+  ccSettings           = preSettingsRes.rows as unknown as typeof ccSettings;
+  defaultBillingEndDay = ccSettings.find(c => c.card === 'sapphire')?.billing_end_day ?? 25;
+
+  openCycle = openCycleMonth(new Date(), defaultBillingEndDay);
+  const cycleParam = Astro.url.searchParams.get('cycle');
+  ccCycle = (cycleParam === month || cycleParam === next) ? cycleParam
+          : (isNow && openCycle === next)                 ? next
+          : month;
+  ccCycleNext = nextMonth(ccCycle);
+
+  const [sumRes, billRes, bigPurchasesRes, cashRes, ccCycleSumRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes] = await client.batch([
     { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] },
     { sql: BILLS_QUERY, args: [month, month, month] },
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -69,25 +101,26 @@ try {
             WHERE cc.month = ? AND cc.is_big_purchase = 1
               AND NOT (cc.is_estimated = 1 AND cc.date IS NOT NULL AND cc.date < date('now'))
             ORDER BY cc.date ASC NULLS LAST, cc.amount DESC`,
-      args: [month],
+      args: [ccCycle],
     },
     { sql: 'SELECT * FROM cash_expenses WHERE month = ? ORDER BY date ASC', args: [month] },
-    { sql: "SELECT * FROM cc_settings WHERE card != 'other' ORDER BY card", args: [] },
+    // cc_budget of the displayed cycle — fallback spend budget when the pay month has no row yet
+    { sql: 'SELECT cc_budget FROM monthly_summary WHERE month = ? LIMIT 1', args: [ccCycle] },
     // Previous month — propagate balances forward when this month has no DB record yet
     { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [prev] },
-    { sql: 'SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card', args: [month] },
-    // Next month — its cc_budget is THIS month's CC spending budget (payment-month convention)
-    { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [next] },
-    // Next month CC bills — subs charged this cycle are tracked in next month's bill_payments
-    { sql: CC_BILLS_QUERY, args: [next, next, next] },
-    // Saved est/actual toggle for this month
-    { sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${month}`] },
+    { sql: 'SELECT * FROM cc_variable_spend WHERE month = ? ORDER BY card', args: [ccCycle] },
+    // The cycle's PAY month — its cc_budget is the spending budget for this cycle
+    { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [ccCycleNext] },
+    // Pay-month CC bills — subs charged this cycle are tracked in that month's bill_payments
+    { sql: CC_BILLS_QUERY, args: [ccCycleNext, ccCycleNext, ccCycleNext] },
+    // Saved est/actual toggle for this cycle
+    { sql: `SELECT value FROM settings WHERE key = ? LIMIT 1`, args: [`cc_recurring_mode_${ccCycle}`] },
     // Plaid sync error from background sync (set by syncCCSpend when token invalid)
     { sql: `SELECT value FROM settings WHERE key = 'plaid_sync_error' LIMIT 1`, args: [] },
     // CC budget baseline — last 12 months with non-zero cc_budget
-    { sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
+    { sql: `SELECT month, cc_budget FROM monthly_summary WHERE month < ? AND cc_budget > 0 ORDER BY month DESC LIMIT 12`, args: [ccCycle] },
     // CC pace baseline — last 6 months of variable spend totals
-    { sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [month] },
+    { sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [ccCycle] },
     // "Statement already paid" markers (`cc_paid_<card>_<YYYY-MM>`)
     { sql: `SELECT key FROM settings WHERE key LIKE 'cc_paid_%'`, args: [] },
   ]);
@@ -118,8 +151,9 @@ try {
     nextMonthCCBudget = Number((nextSumRes.rows[0] as any).cc_budget) || null;
   }
 
+  if (ccCycleSumRes.rows.length) ccCycleBudget = Number((ccCycleSumRes.rows[0] as any).cc_budget) || null;
+
   if (plaidSyncErrRes.rows.length) plaidSyncError = String((plaidSyncErrRes.rows[0] as any).value);
-  ccSettings        = settingsRes.rows     as unknown as typeof ccSettings;
   bigPurchases      = bigPurchasesRes.rows as unknown as BigPurchase[];
   cashExpenses      = cashRes.rows         as unknown as CashExpense[];
   variableSpendRows = varRes.rows          as unknown as typeof variableSpendRows;
@@ -131,8 +165,13 @@ try {
 } finally { client.close(); }
 
 // ── Derived data ─────────────────────────────────────────────────────────────
-const settingsMap          = new Map(ccSettings.map(s => [s.card, s]));
-const defaultBillingEndDay = settingsMap.get('sapphire')?.billing_end_day ?? 25;
+// Cycle presentation. `ccCycleIsOpen` means the statement is still accumulating;
+// `showCycleSwitch` is the divergence window where both cycles are worth reaching.
+const ccCycleIsOpen    = ccCycle === openCycle;
+const ccCycleIsFuture  = ccCycle > openCycle;
+const ccCycleRange     = cycleRangeLabel(ccCycle, defaultBillingEndDay);
+const showCycleSwitch  = isNow && openCycle === next;
+const ccPaymentCycle   = cycleRangeLabel(prev, defaultBillingEndDay);
 
 const { checkingBills, ccBills, skippedCheckingBills } = categorizeBills(bills);
 function sortBills(list: ResolvedBill[]) {
@@ -154,11 +193,11 @@ const ccPayment = computeCCPayment({
 const ccTracker = computeCCSpendingTracker({
   nextBills,
   billingEndDay:     defaultBillingEndDay,
-  nextMonth:         next,
+  nextMonth:         ccCycleNext,
   variableSpendRows,
   bigPurchases,
   nextMonthCCBudget,
-  currentCCBudget:   Number(summary.cc_budget),
+  currentCCBudget:   ccCycleBudget ?? Number(summary.cc_budget),
   savedDisplayMode:  savedRecurringMode,
 });
 
@@ -188,13 +227,13 @@ const ccPaymentPaid = ccSettings.some(s => ccPaidKeys.has(`${s.card}_${prev}`));
 const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
 
 // ── CC statement pacing ───────────────────────────────────────────────────────
-const [pacYr, pacMo] = month.split('-').map(Number);
+// Pacing runs on the cycle axis: cycle M spans (M-1, endDay+1) → (M, endDay).
+const [pacYr, pacMo] = ccCycle.split('-').map(Number);
 const cycleStart = new Date(pacYr, pacMo - 2, defaultBillingEndDay + 1);
 const cycleEnd   = new Date(pacYr, pacMo - 1, defaultBillingEndDay);
 const pacingTotalDays = Math.round((cycleEnd.getTime() - cycleStart.getTime()) / 86400000) + 1;
 const todayMid = new Date(); todayMid.setHours(0, 0, 0, 0);
-const isFuture = month > currentMonth();
-const pacingDaysElapsed = (isNow || isFuture)
+const pacingDaysElapsed = (ccCycleIsOpen || ccCycleIsFuture)
   ? Math.max(0, Math.min(Math.round((todayMid.getTime() - cycleStart.getTime()) / 86400000) + 1, pacingTotalDays))
   : pacingTotalDays;
 const pacingDaysRemaining = Math.max(1, pacingTotalDays - pacingDaysElapsed);
@@ -432,6 +471,7 @@ const projection = projectCCSpend({
       <div class="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5 hover:bg-surface-hover">
         <div class="min-w-0 flex flex-wrap items-center gap-2">
           <span class="text-sm text-stone-600">Credit Card Payment</span>
+          <span class="text-xs text-stone-400" title="This month's payment settles the statement that closed last month — not the cycle shown in the Credit Card section below.">settles {ccPaymentCycle}</span>
           {isNow && (
             <button
               class={`cc-mark-paid rounded-full border px-2.5 py-0.5 text-xs transition-colors disabled:opacity-40 ${
@@ -502,6 +542,39 @@ const projection = projectCCSpend({
 <!-- ── Credit Card Section — all CC-related items together ── -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 
+<!-- Cycle header — every card below runs on the statement axis, not the calendar month -->
+<div id="cc-cycle-header" data-cc-cycle={ccCycle} data-cc-cycle-next={ccCycleNext}
+  class="mb-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+  <div class="flex flex-wrap items-baseline gap-2">
+    <h2 class="text-sm font-semibold text-stone-700">Credit Card</h2>
+    <span class="text-xs text-stone-400">
+      cycle <span class="font-medium text-stone-600">{ccCycleRange}</span> · pays {monthLabel(ccCycleNext)}
+    </span>
+    <span class={`rounded-full border px-2 py-0.5 text-xs ${
+      ccCycleIsOpen   ? 'border-lime-200 bg-lime-50 text-brand-green'
+      : ccCycleIsFuture ? 'border-surface-border text-stone-400'
+      : 'border-surface-border bg-surface text-stone-500'}`}>
+      {ccCycleIsOpen ? 'Open' : ccCycleIsFuture ? 'Upcoming' : 'Closed'}
+    </span>
+  </div>
+  {showCycleSwitch && (
+    <div class="flex overflow-hidden rounded-lg border border-surface-border text-xs">
+      <a href={`/budget?month=${month}&cycle=${month}`}
+        class={`px-3 py-1.5 transition-colors ${ccCycle === month ? 'bg-surface font-medium text-stone-700' : 'text-stone-400 hover:bg-surface-hover'}`}
+      >Closed · {cycleRangeLabel(month, defaultBillingEndDay)}</a>
+      <a href={`/budget?month=${month}&cycle=${next}`}
+        class={`px-3 py-1.5 transition-colors border-l border-surface-border ${ccCycle === next ? 'bg-surface font-medium text-stone-700' : 'text-stone-400 hover:bg-surface-hover'}`}
+      >Open · {cycleRangeLabel(next, defaultBillingEndDay)}</a>
+    </div>
+  )}
+</div>
+{showCycleSwitch && ccCycle === month && (
+  <p class="mb-3 rounded-lg border border-surface-border bg-surface px-3 py-2 text-xs text-stone-500">
+    The {ccCycleRange} statement has closed — these numbers are final. Everything charged since is on the
+    <a href={`/budget?month=${month}&cycle=${next}`} class="font-medium text-brand-green underline">open cycle</a>.
+  </p>
+)}
+
 <!-- CC Variable Spend (one row per card) -->
 <div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
   <div class="flex items-center justify-between mb-3">
@@ -526,7 +599,7 @@ const projection = projectCCSpend({
   <div class="space-y-2" id="variable-spend-rows">
     {ccSettings.map(s => {
       const amount = variableSpendMap.get(s.card) ?? 0;
-      const [yr, mo] = month.split('-').map(Number);
+      const [yr, mo] = ccCycle.split('-').map(Number);
       const payD = new Date(yr, mo, 1);
       const payLabel = `${payD.toLocaleString('en-US',{month:'long',year:'numeric'})} (due ${s.payment_day}th)`;
 
@@ -536,7 +609,7 @@ const projection = projectCCSpend({
           <div class="flex flex-col items-start">
             <span
               class="var-spend-amount tabular-nums text-xl font-semibold cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800"
-              data-card={s.card} data-month={month}
+              data-card={s.card} data-month={ccCycle}
             >{fmt(amount)}</span>
             {variableUpdatedAt.get(s.card) && (
               <span class="synced-time text-xs text-stone-400 px-2" title="Balance last updated by bank" data-ts={variableUpdatedAt.get(s.card)}>
@@ -570,7 +643,7 @@ const projection = projectCCSpend({
         <span class="text-xs text-stone-400">remaining of</span>
         <span class="tabular-nums text-stone-600 text-sm cursor-pointer rounded px-1 hover:bg-surface-hover"
           id="cc-budget-display" data-recurring={ccRecurringInVariable}
-          data-field="cc_budget" data-month={next}
+          data-field="cc_budget" data-month={ccCycleNext}
           title="Click to edit spending budget">{fmt(ccSpendBudget)}</span>
       </div>
     </div>
@@ -634,7 +707,7 @@ const projection = projectCCSpend({
       </span>
     </div>
   )}
-  {projection.enabled && (isNow || isFuture) && (
+  {projection.enabled && (ccCycleIsOpen || ccCycleIsFuture) && (
     <div class="mt-2 rounded-lg border border-surface-border bg-surface px-3 py-2.5"
       id="cc-projection-row"
       data-history-avg={projection.historicalAvg}
@@ -654,7 +727,7 @@ const projection = projectCCSpend({
         <button id="cc-use-projection-btn"
           class="rounded-full bg-lime-50 border border-lime-300 px-3 py-1 text-xs font-medium text-brand-green hover:bg-lime-100 transition-colors"
           data-projected={Math.round(projection.projected)}
-          data-next-month={next}
+          data-next-month={ccCycleNext}
         >Use as budget</button>
       </div>
       <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
@@ -682,7 +755,7 @@ const projection = projectCCSpend({
     <div class="flex items-center gap-3 text-xs">
       <button id="cc-reconcile-btn"
         class="rounded-full border border-surface-border px-2.5 py-1 text-xs text-stone-500 hover:bg-surface-hover transition-colors disabled:opacity-40"
-        data-month={next}
+        data-month={ccCycleNext}
         data-mode="match"
       >Reconcile</button>
       <button id="recurring-mode-toggle"
@@ -699,7 +772,7 @@ const projection = projectCCSpend({
 
   <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1" id="cc-bills">
     {ccBillsNextPaymentDisplay.map(b => {
-      const bm = subBillingMonth(b, defaultBillingEndDay, month);
+      const bm = subBillingMonth(b, defaultBillingEndDay, ccCycle);
       const billingLabel = bm ? `${new Date(bm+'-01').toLocaleString('en-US',{month:'short'})}` : '';
       return (
         <div class={`group flex items-center justify-between gap-1 rounded px-1 py-1 hover:bg-surface-hover ${b.is_skipped ? 'opacity-40' : ''}`} data-bill-id={b.id}>
@@ -708,7 +781,7 @@ const projection = projectCCSpend({
               ? <span class="h-3.5 w-3.5 flex-shrink-0" />
               : <input type="checkbox" checked={b.effective_paid}
                   class="bill-toggle h-3.5 w-3.5 rounded border-stone-300 bg-surface accent-emerald-500 cursor-pointer"
-                  data-bill={b.id} data-month={next} data-is-cc="1" data-is-auto={b.is_auto ? '1' : '0'}
+                  data-bill={b.id} data-month={ccCycleNext} data-is-cc="1" data-is-auto={b.is_auto ? '1' : '0'}
                 />
             }
             <span class={`text-xs truncate ${b.is_skipped ? 'text-stone-400 line-through' : b.effective_paid ? 'text-stone-600' : 'text-stone-400'}`}>{b.name}</span>
@@ -723,13 +796,13 @@ const projection = projectCCSpend({
           <div class="flex items-center gap-1 flex-shrink-0">
             {b.is_skipped
               ? <button class="cc-sub-unskip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-xs px-1.5 py-0.5 rounded border border-surface-border text-stone-400 hover:text-brand-green hover:border-brand-green leading-none"
-                  data-bill-id={b.id} data-month={next}>Unskip</button>
+                  data-bill-id={b.id} data-month={ccCycleNext}>Unskip</button>
               : <>
                   <span class="match-hint hidden text-xs text-emerald-600 tabular-nums" data-bill-match={b.id}></span>
                   <span class={`editable-bill-amount tabular-nums text-xs cursor-pointer rounded px-1 py-0.5 hover:bg-surface-hover ${b.effective_paid ? 'text-stone-700' : 'text-stone-400'}`}
-                    data-bill={b.id} data-month={next} data-is-cc="1">{fmt(b.actual_amount)}</span>
+                    data-bill={b.id} data-month={ccCycleNext} data-is-cc="1">{fmt(b.actual_amount)}</span>
                   <button class="cc-sub-skip opacity-40 sm:opacity-0 sm:group-hover:opacity-100 text-stone-300 hover:text-brand-red text-xs px-0.5 leading-none"
-                    data-bill-id={b.id} data-month={next} title="Skip this sub for this month">✕</button>
+                    data-bill-id={b.id} data-month={ccCycleNext} title="Skip this sub for this cycle">✕</button>
                 </>
             }
           </div>
@@ -803,7 +876,7 @@ const projection = projectCCSpend({
     })}
   </div>
 
-  <form id="add-big-form" class="flex flex-wrap gap-2 items-end" data-month={month} data-big="1">
+  <form id="add-big-form" class="flex flex-wrap gap-2 items-end" data-month={ccCycle} data-big="1">
     <div class="flex flex-col gap-1">
       <label class="text-xs text-stone-400">Date</label>
       <input name="date" type="date" required class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none w-36" />
@@ -849,6 +922,9 @@ const projection = projectCCSpend({
 <script>
 const MONTH = new URLSearchParams(location.search).get('month') ??
   (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
+// The CC section runs on the statement-cycle axis, which diverges from MONTH after
+// the cut-off day. The server stamps the resolved cycle on the CC header.
+const CC_CYCLE = (document.getElementById('cc-cycle-header') as HTMLElement | null)?.dataset.ccCycle ?? MONTH;
 
 // Format synced timestamps in browser-local time
 document.querySelectorAll<HTMLElement>('.synced-time[data-ts]').forEach(el => {
@@ -1103,7 +1179,7 @@ document.getElementById('recurring-mode-toggle')?.addEventListener('click', () =
   }
 
   // Persist the chosen mode so it survives page reload
-  api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${MONTH}`, value: mode }).catch(() => {
+  api('/api/budget/setting', 'POST', { key: `cc_recurring_mode_${CC_CYCLE}`, value: mode }).catch(() => {
     showError('Mode preference could not be saved — it will reset when the page reloads.');
   });
 });
@@ -1195,18 +1271,20 @@ document.querySelectorAll<HTMLElement>('[data-field="cc_budget"]').forEach(el =>
           }
           return;
         }
-        // If this is the spending budget (next month), update the bar too
+        // The spending budget belongs to the cycle's PAY month — it is not a component
+        // of the viewed month's cash flow, so it updates the bar and nothing else.
         if (el.id === 'cc-budget-display') {
           el.dataset.recurring = el.dataset.recurring ?? '0';
           recomputeCC();
-        }
-        // If this is the Variable+Big line, recalc cash flow
-        const sec = document.getElementById('cc-recurring-section') as HTMLElement;
-        if (sec) {
-          sec.dataset.ccVariableBudget = String(fullValue);
-          // CC Payment's recurring = last billing cycle (paid this month), independent of the display toggle.
-          const paymentRecurring = parseFloat(sec.dataset.paymentRecurring ?? '0');
-          recalcCashFlow(paymentRecurring);
+        } else {
+          // Variable+Big line — this IS the viewed month's CC payment, so recalc cash flow.
+          const sec = document.getElementById('cc-recurring-section') as HTMLElement;
+          if (sec) {
+            sec.dataset.ccVariableBudget = String(fullValue);
+            // CC Payment's recurring = last billing cycle (paid this month), independent of the display toggle.
+            const paymentRecurring = parseFloat(sec.dataset.paymentRecurring ?? '0');
+            recalcCashFlow(paymentRecurring);
+          }
         }
       }
     }
@@ -1604,7 +1682,7 @@ addBigForm?.addEventListener('submit', async e => {
   const isEstimated = !!data.get('is_estimated');
   if (!date||!desc||isNaN(amount)) return;
   try {
-    const res = await api('/api/budget/cc-charge','POST',{month:MONTH,date,card,description:desc,amount,is_big_purchase:true,is_estimated:isEstimated,category_id}) as {id:string;payment_month:string|null};
+    const res = await api('/api/budget/cc-charge','POST',{month:addBigForm.dataset.month ?? CC_CYCLE,date,card,description:desc,amount,is_big_purchase:true,is_estimated:isEstimated,category_id}) as {id:string;payment_month:string|null};
     const pm = res.payment_month ?? 'unknown';
     const {pmFmt} = payMonthFor(date, card);
     const container = document.getElementById('big-cc-charges')!;

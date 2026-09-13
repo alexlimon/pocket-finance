@@ -44,10 +44,12 @@ export async function reconcileCCBudgets(
     const s = settingsMap.get(card);
     if (!s) continue;
     const [y, m] = bMonth.split('-').map(Number);
-    const closeDate = new Date(y, m - 1, s.billing_end_day);
+    // billing_end_day is the cycle's last day INCLUSIVE, so the statement is only
+    // final once that whole day has passed — midnight of the following day.
+    const closedAt = new Date(y, m - 1, s.billing_end_day + 1);
     const entry = byBillingMonth.get(bMonth) ?? { total: 0, allClosed: true };
     entry.total += Number(r.amount) || 0;
-    if (today < closeDate) entry.allClosed = false; // statement still open — not final yet
+    if (today < closedAt) entry.allClosed = false; // statement still open — not final yet
     byBillingMonth.set(bMonth, entry);
   }
 
