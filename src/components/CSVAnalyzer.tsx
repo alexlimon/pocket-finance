@@ -407,7 +407,6 @@ function SubscriptionRow({
       <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>
         {s.overdue && <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-red-400 align-middle" title="Overdue — expected charge hasn't appeared" />}
         {s.vendor}
-        <span className="ml-1.5 font-normal text-stone-400">×{s.events}</span>
       </td>
       <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">
         {fmt(s.typical)}
@@ -424,6 +423,7 @@ function SubscriptionRow({
         </td>
       )}
       <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.annualEst)}</td>
+      <td className="hidden px-4 py-2.5 text-center tabular-nums text-stone-500 sm:table-cell" title={`${s.events} recurring charges (${s.charges} transactions)`}>{s.events}×</td>
       <td className="px-4 py-2.5">
         <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{s.account_last4}</span>
       </td>
@@ -466,7 +466,9 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
   const [showDismissed, setShowDismissed] = useState(false);
   const [showAllPossible, setShowAllPossible] = useState(false);
   const [cadenceFilter, setCadenceFilter] = useState<'all' | Cadence | 'irregular'>('all');
-  const [sortKey, setSortKey] = useState<'annual' | 'lastSeen' | 'typical' | 'events'>('annual');
+  const [sort, setSort] = useState<{ key: 'annual' | 'lastSeen' | 'typical' | 'events'; dir: 'asc' | 'desc' }>({
+    key: 'annual', dir: 'desc',
+  });
   const POSSIBLE_LIMIT = 25;
 
   const reloadDismissed = useCallback(async () => {
@@ -563,21 +565,44 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
     await reloadDismissed();
   }
 
-  const SORT_LABELS: Record<typeof sortKey, string> = {
+  const SORT_LABELS: Record<typeof sort.key, string> = {
     annual: 'Annual est.', lastSeen: 'Last seen', typical: 'Amount', events: 'Recurrences',
   };
 
+  function toggleSort(key: typeof sort.key) {
+    setSort(prev => (prev.key === key ? { key, dir: prev.dir === 'desc' ? 'asc' : 'desc' } : { key, dir: 'desc' }));
+  }
+
   function sortRows(rows: CadencedSubscription[]): CadencedSubscription[] {
-    if (sortKey === 'annual') return rows; // engine order (overdue first, then annual est.)
-    const get = sortKey === 'lastSeen'
+    if (sort.key === 'annual' && sort.dir === 'desc') return rows; // engine order (overdue first, then annual est.)
+    const get = sort.key === 'lastSeen'
       ? (s: CadencedSubscription): string | number => s.lastSeen
-      : sortKey === 'typical'
+      : sort.key === 'typical'
         ? (s: CadencedSubscription): string | number => s.typical
-        : (s: CadencedSubscription): string | number => s.events;
+        : sort.key === 'events'
+          ? (s: CadencedSubscription): string | number => s.events
+          : (s: CadencedSubscription): string | number => s.annualEst;
+    const mul = sort.dir === 'desc' ? 1 : -1;
     return [...rows].sort((a, b) => {
       const va = get(a); const vb = get(b);
-      return vb > va ? 1 : vb < va ? -1 : 0;
+      return (vb > va ? 1 : vb < va ? -1 : 0) * mul;
     });
+  }
+
+  function sortArrow(key: typeof sort.key): string {
+    if (sort.key !== key) return '';
+    return sort.dir === 'desc' ? ' ▼' : ' ▲';
+  }
+
+  function SortTh({ label, k, className }: { label: string; k: typeof sort.key; className?: string }) {
+    return (
+      <th className={className ?? 'px-4 py-2.5 text-right font-medium'}>
+        <button onClick={() => toggleSort(k)} title={`Sort by ${label}`}
+          className={`hover:text-stone-800 ${sort.key === k ? 'text-stone-700' : ''}`}>
+          {label}<span className="text-stone-400">{sortArrow(k)}</span>
+        </button>
+      </th>
+    );
   }
 
   function renderTable(rows: CadencedSubscription[], showNext: boolean) {
@@ -587,10 +612,11 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
           <thead>
             <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
               <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
-              <th className="px-4 py-2.5 text-right font-medium">Typical</th>
-              <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Last seen</th>
+              <SortTh label="Typical" k="typical" className="px-4 py-2.5 text-right font-medium" />
+              <SortTh label="Last seen" k="lastSeen" className="hidden px-4 py-2.5 text-left font-medium sm:table-cell" />
               {showNext && <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Next exp.</th>}
-              <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Annual est.</th>
+              <SortTh label="Annual est." k="annual" className="hidden px-4 py-2.5 text-right font-medium sm:table-cell" />
+              <SortTh label="×N" k="events" className="hidden px-4 py-2.5 text-center font-medium sm:table-cell" />
               <th className="px-4 py-2.5 text-left font-medium">Acct</th>
               <th className="px-4 py-2.5 text-left font-medium">Bill</th>
               <th className="w-8 px-2 py-2.5"></th>
@@ -634,14 +660,6 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
           {CADENCE_ORDER.map(c => <option key={c} value={c}>{CADENCE_LABELS[c]}</option>)}
           <option value="irregular">Irregular</option>
         </select>
-        <select value={sortKey}
-          onChange={e => setSortKey(e.target.value as 'annual' | 'lastSeen' | 'typical' | 'events')}
-          className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-800">
-          <option value="annual">Sort: Annual est.</option>
-          <option value="lastSeen">Sort: Last seen</option>
-          <option value="typical">Sort: Amount</option>
-          <option value="events">Sort: Recurrences</option>
-        </select>
       </div>
       {checkingExcluded && (
         <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-2.5 text-xs text-stone-500">
@@ -676,7 +694,7 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
           {visiblePossible.length > POSSIBLE_LIMIT && (
             <button onClick={() => setShowAllPossible(v => !v)}
               className="mt-2 text-xs text-stone-500 hover:underline">
-              {showAllPossible ? 'Show fewer' : `Show all ${visiblePossible.length} (sorted by ${SORT_LABELS[sortKey].toLowerCase()})`}
+              {showAllPossible ? 'Show fewer' : `Show all ${visiblePossible.length} (by ${SORT_LABELS[sort.key].toLowerCase()}${sort.dir === 'asc' ? ', ascending' : ''})`}
             </button>
           )}
         </div>
