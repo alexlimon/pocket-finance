@@ -48,11 +48,12 @@ export async function POST(context: APIContext): Promise<Response> {
   const file = formData.get('file') as File | null;
   if (!file) return json({ error: 'Missing file' }, 400);
 
-  // Extract account last 4 from filename: Chase1957_Activity... → '1957'
+  // Extract account last 4 from filename: Chase2605_Activity... → '2605'
   const filenameMatch = file.name.match(/Chase(\d{4})_/i);
   const account_last4 = filenameMatch?.[1] ?? 'unknown';
-  // 3606 = Amazon CC, everything else treated as checking
-  const account_source = account_last4 === '3606' ? 'amazon-cc' : 'checking';
+  // 2605 = checking, 3606 = Amazon CC, everything else is a credit card
+  const account_source =
+    account_last4 === '2605' ? 'checking' : account_last4 === '3606' ? 'amazon-cc' : 'credit-card';
 
   const text = await file.text();
   const lines = text.trim().split('\n').filter(l => l.trim());

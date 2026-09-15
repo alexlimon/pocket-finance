@@ -62,6 +62,13 @@ function isPurchase(t: CsvTransaction): boolean {
   return t.amount < 0 && t.type?.toLowerCase() !== 'payment';
 }
 
+// Checking = the 2605 account. Everything else is a credit card.
+// Matched on last4 only: account_source is unreliable for older rows
+// (non-3606 uploads used to be tagged 'checking' regardless of account).
+function isCheckingTxn(t: Pick<CsvTransaction, 'account_source' | 'account_last4'>): boolean {
+  return t.account_last4 === '2605';
+}
+
 // UTC weekday, parsed manually to avoid local-timezone drift. 0 = Sun … 6 = Sat.
 function isWeekend(iso: string): boolean {
   const [y, m, d] = iso.split('-').map(Number);
@@ -227,7 +234,7 @@ interface AccountInfo {
 
 function buildAccountInfo(txns: CsvTransaction[]): Map<string, AccountInfo> {
   const map = new Map<string, AccountInfo>();
-  const labels: Record<string, string> = { '1957': 'Chase Checking', '3606': 'Amazon CC' };
+  const labels: Record<string, string> = { '2605': 'Chase Checking', '3606': 'Amazon CC' };
   for (const t of txns) {
     if (!map.has(t.account_last4)) {
       map.set(t.account_last4, {
@@ -246,7 +253,7 @@ function buildAccountInfo(txns: CsvTransaction[]): Map<string, AccountInfo> {
   return map;
 }
 
-const ACCOUNT_LABELS: Record<string, string> = { '1957': 'Checking', '3606': 'Amazon CC' };
+const ACCOUNT_LABELS: Record<string, string> = { '2605': 'Checking', '3606': 'Amazon CC' };
 function acctLabel(last4: string): string { return `${ACCOUNT_LABELS[last4] ?? 'Acct'} ···${last4}`; }
 
 // ── Empty state ───────────────────────────────────────────────────────────────
@@ -1335,13 +1342,29 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
   const [gmailSyncMsg, setGmailSyncMsg] = useState('');
   const [amazonUploading, setAmazonUploading] = useState(false);
   const [amazonMsg,       setAmazonMsg]       = useState('');
+  const [excludeChecking, setExcludeChecking] = useState(() => {
+    try {
+      const v = localStorage.getItem('analyze-exclude-checking');
+      return v === null ? true : v === '1';
+    } catch { return true; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem('analyze-exclude-checking', excludeChecking ? '1' : '0'); } catch { /* ignore */ }
+  }, [excludeChecking]);
 
   const accountInfo = useMemo(() => buildAccountInfo(transactions), [transactions]);
 
+  // Visible set for every analysis tab + export. Upload keeps the full list.
+  const visibleTransactions = useMemo(
+    () => (excludeChecking ? transactions.filter(t => !isCheckingTxn(t)) : transactions),
+    [transactions, excludeChecking],
+  );
+
   const enrichedTxns = useMemo<CsvTransaction[]>(() => {
-    if (!matches.length) return transactions;
+    if (!matches.length) return visibleTransactions;
     const matchMap = new Map(matches.map(m => [m.txn_id, m]));
-    return transactions.map(t => {
+    return visibleTransactions.map(t => {
       const match = matchMap.get(t.id);
       if (!match?.all_items_raw) return t;
       const items: { name: string; qty: number }[] = match.all_items_raw.split('||').flatMap(chunk => {
@@ -1350,7 +1373,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
       const primaryName = items[0]?.name;
       return primaryName ? { ...t, description: primaryName } : t;
     });
-  }, [transactions, matches]);
+  }, [visibleTransactions, matches]);
 
   const reloadMatches = useCallback(async () => {
     try {
@@ -1467,10 +1490,33 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
       <div className="flex-1 min-w-0">
         <div className="mb-5 flex items-center justify-between gap-4">
           <h1 className="text-lg font-semibold text-stone-800">{TAB_TITLES[activeTab]}</h1>
-          <a
-            href="/api/transactions/export"
-            className="shrink-0 rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-600 hover:text-stone-800"
-          >Download CSV</a>
+          <div className="flex shrink-0 items-center gap-3">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={excludeChecking}
+              title="Hide Chase checking transactions in every tab and in the CSV export"
+              onClick={() => setExcludeChecking(v => !v)}
+              className="flex cursor-pointer items-center gap-2 select-none"
+            >
+              <span
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                  excludeChecking ? 'bg-stone-800' : 'bg-stone-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
+                    excludeChecking ? 'translate-x-4' : 'translate-x-0.5'
+                  }`}
+                />
+              </span>
+              <span className="text-sm text-stone-500">Exclude checking</span>
+            </button>
+            <a
+              href={excludeChecking ? '/api/transactions/export?exclude_checking=1' : '/api/transactions/export'}
+              className="shrink-0 rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-600 hover:text-stone-800"
+            >Download CSV</a>
+          </div>
         </div>
 
         {activeTab === 'upload' && (
@@ -1489,7 +1535,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
         {activeTab === 'categories'    && <CategoriesPanel    txns={enrichedTxns} />}
         {activeTab === 'amazon'        && (
           <AmazonPanel
-            txns={transactions} gmailStatus={gmailStatus} matches={matches}
+            txns={visibleTransactions} gmailStatus={gmailStatus} matches={matches}
             onGoToUpload={() => setActiveTab('upload')}
           />
         )}
