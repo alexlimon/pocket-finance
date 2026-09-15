@@ -69,6 +69,12 @@ export async function GET(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
   if (!(await verifySession(context.request, env))) return json({ error: 'Unauthorized' }, 401);
 
+  const params = new URL(context.request.url).searchParams;
+  const excludeChecking = params.get('exclude_checking') === '1' || params.get('exclude_checking') === 'true';
+  // Checking = the 2605 account; everything else is a credit card.
+  // Filtered on last4 only — stored account_source is unreliable for older rows.
+  const chaseWhere = excludeChecking ? `WHERE t.account_last4 <> '2605'` : '';
+
   const client = getClient(env);
   try {
     const [chaseRes, bigRes, orderRes] = await Promise.all([
@@ -93,6 +99,7 @@ export async function GET(context: APIContext): Promise<Response> {
           JOIN amazon_shipments s ON s.order_id = m2.order_id
           GROUP BY m2.txn_id, m2.order_id
         ) m ON m.txn_id = t.id
+        ${chaseWhere}
         ORDER BY t.date ASC, t.account_last4 ASC
       `),
       client.execute(`
