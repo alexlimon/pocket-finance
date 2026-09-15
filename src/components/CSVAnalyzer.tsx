@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { normalizeVendor } from '../lib/vendor-match';
+import { detectSubscriptions, groupAlias, CHECKING_LAST4, type CadencedSubscription, type Cadence } from '../lib/subscriptions';
 import MortgageCalculator from './MortgageCalculator';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -122,60 +123,7 @@ function priorPeriods(period: string, n: number, granularity: Granularity): stri
 
 // ── Computations ──────────────────────────────────────────────────────────────
 
-interface Subscription {
-  vendor: string;
-  amount: number;
-  total: number;
-  months: string[];
-  count: number;
-  account_last4: string;
-  due_day: number | null;
-}
-
-
-function findSubscriptions(txns: CsvTransaction[]): Subscription[] {
-  const purchases = txns.filter(t => isPurchase(t) && !normalizeVendor(t.description).startsWith('AMAZON'));
-  const byVendorAcct = new Map<string, CsvTransaction[]>();
-  for (const t of purchases) {
-    const key = `${normalizeVendor(t.description)}||${t.account_last4}`;
-    if (!byVendorAcct.has(key)) byVendorAcct.set(key, []);
-    byVendorAcct.get(key)!.push(t);
-  }
-  const results: Subscription[] = [];
-  for (const [, rows] of byVendorAcct) {
-    const byMonth = new Map<string, number>();
-    for (const t of rows) {
-      const ym = t.date.slice(0, 7);
-      byMonth.set(ym, (byMonth.get(ym) ?? 0) + Math.abs(t.amount));
-    }
-    const months = [...byMonth.keys()].sort();
-    const hasConsecutive = months.some((ym, i) => {
-      if (i === 0) return false;
-      const [y1, m1] = months[i - 1]!.split('-').map(Number);
-      const [y2, m2] = ym.split('-').map(Number);
-      if (y2 * 12 + m2 !== y1 * 12 + m1 + 1) return false;
-      const a1 = byMonth.get(months[i - 1]!)!;
-      const a2 = byMonth.get(ym)!;
-      return Math.abs(a1 - a2) / ((a1 + a2) / 2) <= 0.10;
-    });
-    if (!hasConsecutive) continue;
-    const monthlyAmounts = months.map(m => byMonth.get(m)!).sort((a, b) => a - b);
-    const medianAmt = monthlyAmounts[Math.floor(monthlyAmounts.length / 2)]!;
-    const vendor = rows.reduce((best, t) => t.description.length > best.length ? t.description : best, '');
-    const days = rows.map(t => parseInt(t.date.slice(8, 10))).sort((a, b) => a - b);
-    const due_day = days[Math.floor(days.length / 2)] ?? null;
-    results.push({
-      vendor,
-      amount: Math.round(medianAmt * 100) / 100,
-      total: Math.round(monthlyAmounts.reduce((s, a) => s + a, 0) * 100) / 100,
-      months, count: rows.length, account_last4: rows[0]!.account_last4,
-      due_day,
-    });
-  }
-  return results.sort((a, b) =>
-    b.months[b.months.length - 1]!.localeCompare(a.months[a.months.length - 1]!) || b.amount - a.amount
-  );
-}
+// (Subscription detection lives in ../lib/subscriptions — cadence engine.)
 
 interface CategoryRow { cat: string; amount: number; pct: number; count: number }
 
@@ -432,30 +380,124 @@ function UploadPanel({
 
 // ── Panel: Subscriptions ──────────────────────────────────────────────────────
 
-interface CCBillAlias { id: string; name: string; vendor_alias: string | null; }
+interface BillAlias { id: string; name: string; vendor_alias: string | null; is_cc_default: number; }
+interface Dismissal { vendor_alias: string; account_last4: string; }
 
-function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
-  const subs = useMemo(() => findSubscriptions(txns), [txns]);
-  const [ccBills, setCcBills] = useState<CCBillAlias[]>([]);
-  const [saving,  setSaving]  = useState<string | null>(null); // normalized alias being saved
+const CADENCE_LABELS: Record<Cadence, string> = {
+  monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semi-annual', annual: 'Yearly',
+};
+const CADENCE_ORDER: Cadence[] = ['monthly', 'quarterly', 'semiannual', 'annual'];
+
+function SubscriptionRow({
+  s, bills, mappedId, isSaving, onMap, onCreate, onDismiss, showNext,
+}: {
+  s: CadencedSubscription;
+  bills: BillAlias[];
+  mappedId: string;
+  isSaving: boolean;
+  onMap: (sub: CadencedSubscription, billId: string) => void;
+  onCreate: (sub: CadencedSubscription) => void;
+  onDismiss: (sub: CadencedSubscription) => void;
+  showNext: boolean;
+}) {
+  const ccBills = bills.filter(b => b.is_cc_default);
+  const checkingBills = bills.filter(b => !b.is_cc_default);
+  return (
+    <tr className="hover:bg-stone-50">
+      <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>
+        {s.overdue && <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-red-400 align-middle" title="Overdue — expected charge hasn't appeared" />}
+        {s.vendor}
+        <span className="ml-1.5 font-normal text-stone-400">×{s.events}</span>
+      </td>
+      <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">
+        {fmt(s.typical)}
+        {s.maxAmount !== s.minAmount && (
+          <span className="block text-[11px] font-normal text-stone-400">{fmt(s.minAmount)}–{fmt(s.maxAmount)}</span>
+        )}
+      </td>
+      <td className="hidden whitespace-nowrap px-4 py-2.5 tabular-nums text-stone-500 sm:table-cell">{fmtDate(s.lastSeen)}</td>
+      {showNext && (
+        <td className="hidden whitespace-nowrap px-4 py-2.5 tabular-nums sm:table-cell">
+          {s.nextExpected
+            ? <span className={s.overdue ? 'font-medium text-red-500' : 'text-stone-500'}>~{fmtDate(s.nextExpected)}</span>
+            : <span className="text-stone-300">—</span>}
+        </td>
+      )}
+      <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.annualEst)}</td>
+      <td className="px-4 py-2.5">
+        <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{s.account_last4}</span>
+      </td>
+      <td className="px-4 py-2.5">
+        <select
+          value={mappedId}
+          disabled={isSaving}
+          onChange={e => {
+            if (e.target.value === '__create__') onCreate(s);
+            else onMap(s, e.target.value);
+          }}
+          className="rounded border border-stone-200 bg-white px-2 py-1 text-xs text-stone-600 disabled:opacity-50"
+        >
+          <option value="">— unmap —</option>
+          {ccBills.length > 0 && (
+            <optgroup label="Credit card bills">
+              {ccBills.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </optgroup>
+          )}
+          {checkingBills.length > 0 && (
+            <optgroup label="Checking bills">
+              {checkingBills.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </optgroup>
+          )}
+          <option value="__create__">+ Create new bill</option>
+        </select>
+      </td>
+      <td className="px-2 py-2.5">
+        <button onClick={() => onDismiss(s)} title="Not a subscription — hide it"
+          className="rounded px-1.5 py-0.5 text-stone-300 hover:bg-stone-100 hover:text-stone-500 transition-colors">✕</button>
+      </td>
+    </tr>
+  );
+}
+
+function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]; checkingExcluded: boolean }) {
+  const [bills, setBills] = useState<BillAlias[]>([]);
+  const [dismissed, setDismissed] = useState<Dismissal[]>([]);
+  const [saving, setSaving] = useState<string | null>(null); // sub key being saved
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [showAllPossible, setShowAllPossible] = useState(false);
+  const POSSIBLE_LIMIT = 25;
+
+  const reloadDismissed = useCallback(async () => {
+    try {
+      const r = await fetch('/api/budget/subscription-dismiss');
+      if (r.ok) setDismissed(await r.json() as Dismissal[]);
+    } catch { /* non-critical */ }
+  }, []);
 
   useEffect(() => {
     fetch('/api/budget/bill-alias')
       .then(r => r.ok ? r.json() : [])
-      .then(data => setCcBills(data as CCBillAlias[]))
+      .then(data => setBills(data as BillAlias[]))
       .catch(() => {});
-  }, []);
+    reloadDismissed();
+  }, [reloadDismissed]);
+
+  const dismissedSet = useMemo(
+    () => new Set(dismissed.map(d => `${d.vendor_alias}||${d.account_last4}`)),
+    [dismissed],
+  );
+  const scan = useMemo(() => detectSubscriptions(txns, dismissedSet), [txns, dismissedSet]);
 
   // normalized alias → bill_id for already-mapped bills
   const aliasToId = useMemo(() => {
     const m = new Map<string, string>();
-    for (const b of ccBills) { if (b.vendor_alias) m.set(b.vendor_alias, b.id); }
+    for (const b of bills) { if (b.vendor_alias) m.set(b.vendor_alias, b.id); }
     return m;
-  }, [ccBills]);
+  }, [bills]);
 
-  async function handleMap(subVendor: string, billId: string) {
-    const alias = normalizeVendor(subVendor);
-    setSaving(alias);
+  async function handleMap(sub: CadencedSubscription, billId: string) {
+    const alias = sub.alias;
+    setSaving(sub.key);
     try {
       const targetId = billId || (aliasToId.get(alias) ?? '');
       if (!targetId) { setSaving(null); return; }
@@ -465,7 +507,7 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
         body: JSON.stringify({ bill_id: targetId, vendor_alias: billId ? alias : null }),
       });
       if (res.ok) {
-        setCcBills(prev => prev.map(b => {
+        setBills(prev => prev.map(b => {
           if (b.vendor_alias === alias && b.id !== billId) return { ...b, vendor_alias: null };
           if (b.id === billId) return { ...b, vendor_alias: alias };
           if (b.id === targetId && !billId) return { ...b, vendor_alias: null };
@@ -475,9 +517,9 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
     } finally { setSaving(null); }
   }
 
-  async function handleCreate(sub: Subscription) {
-    const alias = normalizeVendor(sub.vendor);
-    setSaving(alias);
+  async function handleCreate(sub: CadencedSubscription) {
+    const alias = sub.alias;
+    setSaving(sub.key);
     try {
       // Derive a clean display name: title-case the normalized vendor string
       const name = alias.split(' ')
@@ -488,9 +530,9 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           name,
-          amount:       sub.amount,
+          amount:       sub.typical,
           due_day:      sub.due_day,
-          is_cc:        true,
+          is_cc:        sub.account_last4 !== CHECKING_LAST4,
           entity_id:    'household',
           start_month:  new Date().toISOString().slice(0, 7),
           vendor_alias: alias,
@@ -498,75 +540,134 @@ function SubscriptionsPanel({ txns }: { txns: CsvTransaction[] }) {
       });
       if (!res.ok) return;
       const { id } = await res.json() as { id: string };
-      setCcBills(prev => [
+      setBills(prev => [
         ...prev.map(b => b.vendor_alias === alias ? { ...b, vendor_alias: null } : b),
-        { id, name, vendor_alias: alias },
+        { id, name, vendor_alias: alias, is_cc_default: sub.account_last4 !== CHECKING_LAST4 ? 1 : 0 },
       ]);
     } finally { setSaving(null); }
   }
 
-  if (!subs.length) return <EmptyState message="No recurring charges detected yet — upload at least 2 months of data." />;
-  return (
-    <div className="space-y-3">
-      <p className="text-sm text-stone-500">Same vendor + same amount in 2+ consecutive months. Select a CC bill to map a vendor for Reconcile.</p>
+  async function handleDismiss(sub: CadencedSubscription) {
+    await fetch('/api/budget/subscription-dismiss', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vendor_alias: sub.alias, account_last4: sub.account_last4 }),
+    });
+    await reloadDismissed();
+  }
+
+  async function handleUndismiss(d: Dismissal) {
+    await fetch(`/api/budget/subscription-dismiss?vendor_alias=${encodeURIComponent(d.vendor_alias)}&account=${encodeURIComponent(d.account_last4)}`, { method: 'DELETE' });
+    await reloadDismissed();
+  }
+
+  function renderTable(rows: CadencedSubscription[], showNext: boolean) {
+    return (
       <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-stone-100 bg-stone-50 text-xs text-stone-500">
               <th className="px-4 py-2.5 text-left font-medium">Vendor</th>
-              <th className="px-4 py-2.5 text-right font-medium">Amount</th>
-              <th className="hidden px-4 py-2.5 text-center font-medium sm:table-cell">Months seen</th>
+              <th className="px-4 py-2.5 text-right font-medium">Typical</th>
+              <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Last seen</th>
+              {showNext && <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Next exp.</th>}
               <th className="hidden px-4 py-2.5 text-right font-medium sm:table-cell">Annual est.</th>
               <th className="px-4 py-2.5 text-left font-medium">Acct</th>
-              <th className="px-4 py-2.5 text-left font-medium">CC Bill</th>
+              <th className="px-4 py-2.5 text-left font-medium">Bill</th>
+              <th className="w-8 px-2 py-2.5"></th>
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
-            {subs.map((s, i) => {
-              const alias    = normalizeVendor(s.vendor);
-              const mappedId = aliasToId.get(alias) ?? '';
-              const isSaving = saving === alias;
-              return (
-                <tr key={i} className="hover:bg-stone-50">
-                  <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>{s.vendor}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-stone-700">{fmt(s.amount)}</td>
-                  <td className="hidden px-4 py-2.5 text-center sm:table-cell">
-                    <div className="flex flex-wrap justify-center gap-1">
-                      {s.months.map(m => (
-                        <span key={m} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{monthLabel(m)}</span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.amount * 12)}</td>
-                  <td className="px-4 py-2.5">
-                    <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-mono text-stone-500">···{s.account_last4}</span>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <select
-                      value={mappedId}
-                      disabled={isSaving}
-                      onChange={e => {
-                        if (e.target.value === '__create__') handleCreate(s);
-                        else handleMap(s.vendor, e.target.value);
-                      }}
-                      className="rounded border border-stone-200 bg-white px-2 py-1 text-xs text-stone-600 disabled:opacity-50"
-                    >
-                      <option value="">— unmap —</option>
-                      {ccBills.map(b => (
-                        <option key={b.id} value={b.id}>{b.name}</option>
-                      ))}
-                      <option value="__create__">+ Create new bill</option>
-                    </select>
-                  </td>
-                </tr>
-              );
-            })}
+            {rows.map(s => (
+              <SubscriptionRow
+                key={s.key} s={s} bills={bills}
+                mappedId={aliasToId.get(s.alias) ?? ''}
+                isSaving={saving === s.key}
+                onMap={handleMap} onCreate={handleCreate} onDismiss={handleDismiss}
+                showNext={showNext}
+              />
+            ))}
           </tbody>
         </table>
       </div>
-      <p className="text-xs text-stone-400">
-        {subs.length} subscriptions detected · Est. annual total: {fmt(subs.reduce((s, r) => s + r.amount * 12, 0))}
+    );
+  }
+
+  const totalFound = scan.confirmed.length + scan.possible.length + scan.irregular.length;
+  if (!totalFound && !dismissed.length) {
+    return <EmptyState message="No recurring charges detected yet — upload more history (yearly finds need ~2 years)." />;
+  }
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-stone-500">
+        Timing-based detection across monthly → yearly cadences. Map a vendor to a budget bill (CC bills feed Reconcile).
       </p>
+      {checkingExcluded && (
+        <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-2.5 text-xs text-stone-500">
+          Checking is hidden — dues paid from checking (e.g. HOA) won't appear here. Turn off “Exclude checking” above to scan it.
+        </p>
+      )}
+
+      {CADENCE_ORDER.map(cadence => {
+        const rows = scan.confirmed.filter(s => s.cadence === cadence);
+        if (!rows.length) return null;
+        return (
+          <div key={cadence}>
+            <div className="mb-2 flex items-baseline justify-between">
+              <h3 className="text-sm font-semibold text-stone-700">{CADENCE_LABELS[cadence]}</h3>
+              <span className="text-xs text-stone-400">~{fmt(rows.reduce((s, r) => s + r.annualEst, 0))}/yr</span>
+            </div>
+            {renderTable(rows, true)}
+          </div>
+        );
+      })}
+
+      {scan.possible.length > 0 && (
+        <div>
+          <div className="mb-2 flex items-baseline justify-between">
+            <h3 className="text-sm font-semibold text-stone-700">Possible <span className="font-normal text-stone-400">— weak signal or variable amounts, needs review</span></h3>
+            <span className="text-xs text-stone-400">~{fmt(scan.possible.reduce((s, r) => s + r.annualEst, 0))}/yr</span>
+          </div>
+          {renderTable(showAllPossible ? scan.possible : scan.possible.slice(0, POSSIBLE_LIMIT), true)}
+          {scan.possible.length > POSSIBLE_LIMIT && (
+            <button onClick={() => setShowAllPossible(v => !v)}
+              className="mt-2 text-xs text-stone-500 hover:underline">
+              {showAllPossible ? 'Show fewer' : `Show all ${scan.possible.length} (sorted by annual est.)`}
+            </button>
+          )}
+        </div>
+      )}
+
+      {scan.irregular.length > 0 && (
+        <div>
+          <div className="mb-2 flex items-baseline justify-between">
+            <h3 className="text-sm font-semibold text-stone-700">Repeating, no clear cadence <span className="font-normal text-stone-400">— installment-style or drifting dues</span></h3>
+            <span className="text-xs text-stone-400">~{fmt(scan.irregular.reduce((s, r) => s + r.annualEst, 0))}/yr pace</span>
+          </div>
+          {renderTable(scan.irregular, false)}
+        </div>
+      )}
+
+      {dismissed.length > 0 && (
+        <p className="text-xs text-stone-400">
+          {dismissed.length} hidden
+          <button onClick={() => setShowDismissed(v => !v)} className="ml-1.5 hover:underline">
+            {showDismissed ? 'hide' : 'show'}
+          </button>
+          {showDismissed && (
+            <span className="ml-2 flex flex-wrap gap-1.5">
+              {dismissed.map(d => (
+                <span key={`${d.vendor_alias}||${d.account_last4}`}
+                  className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[11px] text-stone-500">
+                  {groupAlias(d.vendor_alias)} ···{d.account_last4}
+                  <button onClick={() => handleUndismiss(d)} title="Unhide"
+                    className="text-stone-400 hover:text-stone-700">↩</button>
+                </span>
+              ))}
+            </span>
+          )}
+        </p>
+      )}
     </div>
   );
 }
@@ -1531,7 +1632,7 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
           />
         )}
         {activeTab === 'suggestions'   && <SuggestionsPanel   txns={enrichedTxns} />}
-        {activeTab === 'subscriptions' && <SubscriptionsPanel txns={enrichedTxns} />}
+        {activeTab === 'subscriptions' && <SubscriptionsPanel txns={enrichedTxns} checkingExcluded={excludeChecking} />}
         {activeTab === 'categories'    && <CategoriesPanel    txns={enrichedTxns} />}
         {activeTab === 'amazon'        && (
           <AmazonPanel

@@ -2,7 +2,7 @@ import type { APIContext } from 'astro';
 import { verifySession } from '../../../lib/auth';
 import { getClient, json } from '../../../lib/db';
 
-// GET — returns all CC recurring bills with their current vendor_alias
+// GET — returns all recurring bills (CC + checking) with their current vendor_alias
 export async function GET(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
   if (!(await verifySession(context.request, env))) return json({ error: 'Unauthorized' }, 401);
@@ -10,10 +10,10 @@ export async function GET(context: APIContext): Promise<Response> {
   const client = getClient(env);
   try {
     const r = await client.execute(
-      `SELECT id, name, vendor_alias
+      `SELECT id, name, vendor_alias, is_cc_default
        FROM budget_config
-       WHERE is_recurring = 1 AND is_cc_default = 1
-       ORDER BY name ASC`
+       WHERE is_recurring = 1
+       ORDER BY is_cc_default DESC, name ASC`
     );
     return json(r.rows);
   } finally { client.close(); }

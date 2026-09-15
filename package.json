@@ -12,6 +12,7 @@
     "migrate": "npx tsx scripts/migrate-budget.ts",
     "migrate:billing": "npx tsx scripts/migrate-billing.ts",
     "migrate:csv": "npx tsx scripts/migrate-csv-transactions.ts",
+    "migrate:dismiss": "npx tsx scripts/migrate-subscription-dismiss.ts",
     "migrate:amazon": "npx tsx scripts/migrate-amazon-orders.ts",
     "migrate:amazon-v2": "npx tsx scripts/migrate-amazon-v2.ts",
     "migrate:amazon-v3": "npx tsx scripts/migrate-amazon-v3.ts",
