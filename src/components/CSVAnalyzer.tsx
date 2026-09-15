@@ -1465,8 +1465,12 @@ export default function CSVAnalyzer({ initialTransactions, initialGmailStatus }:
 
       {/* ── Content ── */}
       <div className="flex-1 min-w-0">
-        <div className="mb-5">
+        <div className="mb-5 flex items-center justify-between gap-4">
           <h1 className="text-lg font-semibold text-stone-800">{TAB_TITLES[activeTab]}</h1>
+          <a
+            href="/api/transactions/export"
+            className="shrink-0 rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-600 hover:text-stone-800"
+          >Download CSV</a>
         </div>
 
         {activeTab === 'upload' && (
