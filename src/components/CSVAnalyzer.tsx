@@ -465,6 +465,8 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
   const [saving, setSaving] = useState<string | null>(null); // sub key being saved
   const [showDismissed, setShowDismissed] = useState(false);
   const [showAllPossible, setShowAllPossible] = useState(false);
+  const [cadenceFilter, setCadenceFilter] = useState<'all' | Cadence | 'irregular'>('all');
+  const [sortKey, setSortKey] = useState<'annual' | 'lastSeen' | 'typical' | 'events'>('annual');
   const POSSIBLE_LIMIT = 25;
 
   const reloadDismissed = useCallback(async () => {
@@ -561,6 +563,23 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
     await reloadDismissed();
   }
 
+  const SORT_LABELS: Record<typeof sortKey, string> = {
+    annual: 'Annual est.', lastSeen: 'Last seen', typical: 'Amount', events: 'Recurrences',
+  };
+
+  function sortRows(rows: CadencedSubscription[]): CadencedSubscription[] {
+    if (sortKey === 'annual') return rows; // engine order (overdue first, then annual est.)
+    const get = sortKey === 'lastSeen'
+      ? (s: CadencedSubscription): string | number => s.lastSeen
+      : sortKey === 'typical'
+        ? (s: CadencedSubscription): string | number => s.typical
+        : (s: CadencedSubscription): string | number => s.events;
+    return [...rows].sort((a, b) => {
+      const va = get(a); const vb = get(b);
+      return vb > va ? 1 : vb < va ? -1 : 0;
+    });
+  }
+
   function renderTable(rows: CadencedSubscription[], showNext: boolean) {
     return (
       <div className="overflow-x-auto rounded-xl border border-stone-200 bg-white">
@@ -578,7 +597,7 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100">
-            {rows.map(s => (
+            {sortRows(rows).map(s => (
               <SubscriptionRow
                 key={s.key} s={s} bills={bills}
                 mappedId={aliasToId.get(s.alias) ?? ''}
@@ -597,18 +616,43 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
   if (!totalFound && !dismissed.length) {
     return <EmptyState message="No recurring charges detected yet — upload more history (yearly finds need ~2 years)." />;
   }
+  const visibleCadences = CADENCE_ORDER.filter(c => cadenceFilter === 'all' || c === cadenceFilter);
+  const visiblePossible = scan.possible.filter(s => cadenceFilter === 'all' || s.cadence === cadenceFilter);
+  const showIrregular = scan.irregular.length > 0 && (cadenceFilter === 'all' || cadenceFilter === 'irregular');
+  const visibleCount = visibleCadences.reduce((n, c) => n + scan.confirmed.filter(s => s.cadence === c).length, 0)
+    + visiblePossible.length + (showIrregular ? scan.irregular.length : 0);
   return (
     <div className="space-y-5">
       <p className="text-sm text-stone-500">
         Timing-based detection across monthly → yearly cadences. Map a vendor to a budget bill (CC bills feed Reconcile).
       </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={cadenceFilter}
+          onChange={e => setCadenceFilter(e.target.value as 'all' | Cadence | 'irregular')}
+          className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-800">
+          <option value="all">All cadences</option>
+          {CADENCE_ORDER.map(c => <option key={c} value={c}>{CADENCE_LABELS[c]}</option>)}
+          <option value="irregular">Irregular</option>
+        </select>
+        <select value={sortKey}
+          onChange={e => setSortKey(e.target.value as 'annual' | 'lastSeen' | 'typical' | 'events')}
+          className="rounded-lg border border-stone-200 bg-white px-3 py-1.5 text-sm text-stone-800">
+          <option value="annual">Sort: Annual est.</option>
+          <option value="lastSeen">Sort: Last seen</option>
+          <option value="typical">Sort: Amount</option>
+          <option value="events">Sort: Recurrences</option>
+        </select>
+      </div>
       {checkingExcluded && (
         <p className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-2.5 text-xs text-stone-500">
           Checking is hidden — dues paid from checking (e.g. HOA) won't appear here. Turn off “Exclude checking” above to scan it.
         </p>
       )}
+      {!visibleCount && (
+        <EmptyState message="Nothing at this cadence — try another filter." />
+      )}
 
-      {CADENCE_ORDER.map(cadence => {
+      {visibleCadences.map(cadence => {
         const rows = scan.confirmed.filter(s => s.cadence === cadence);
         if (!rows.length) return null;
         return (
@@ -622,23 +666,23 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
         );
       })}
 
-      {scan.possible.length > 0 && (
+      {visiblePossible.length > 0 && (
         <div>
           <div className="mb-2 flex items-baseline justify-between">
             <h3 className="text-sm font-semibold text-stone-700">Possible <span className="font-normal text-stone-400">— weak signal or variable amounts, needs review</span></h3>
-            <span className="text-xs text-stone-400">~{fmt(scan.possible.reduce((s, r) => s + r.annualEst, 0))}/yr</span>
+            <span className="text-xs text-stone-400">~{fmt(visiblePossible.reduce((s, r) => s + r.annualEst, 0))}/yr</span>
           </div>
-          {renderTable(showAllPossible ? scan.possible : scan.possible.slice(0, POSSIBLE_LIMIT), true)}
-          {scan.possible.length > POSSIBLE_LIMIT && (
+          {renderTable(showAllPossible ? visiblePossible : visiblePossible.slice(0, POSSIBLE_LIMIT), true)}
+          {visiblePossible.length > POSSIBLE_LIMIT && (
             <button onClick={() => setShowAllPossible(v => !v)}
               className="mt-2 text-xs text-stone-500 hover:underline">
-              {showAllPossible ? 'Show fewer' : `Show all ${scan.possible.length} (sorted by annual est.)`}
+              {showAllPossible ? 'Show fewer' : `Show all ${visiblePossible.length} (sorted by ${SORT_LABELS[sortKey].toLowerCase()})`}
             </button>
           )}
         </div>
       )}
 
-      {scan.irregular.length > 0 && (
+      {showIrregular && (
         <div>
           <div className="mb-2 flex items-baseline justify-between">
             <h3 className="text-sm font-semibold text-stone-700">Repeating, no clear cadence <span className="font-normal text-stone-400">— installment-style or drifting dues</span></h3>
