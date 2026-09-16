@@ -404,10 +404,13 @@ function SubscriptionRow({
   const ccBills = bills.filter(b => b.is_cc_default);
   const checkingBills = bills.filter(b => !b.is_cc_default);
   // Monthly rows show month chips; longer cadences show quarter chips.
+  // Short labels ("Apr '25", "Q1 '26") + nowrap keep pills on one line so the
+  // narrow column wraps *between* pills instead of *inside* them.
   const seenPeriods = s.cadence === 'monthly'
     ? s.periods
     : [...new Set(s.periods.map(p => quarterKey(`${p}-01`)))];
-  const seenLabel = (p: string) => (s.cadence === 'monthly' ? monthLabel(p) : periodLabel(p, 'quarter'));
+  const seenFull = (p: string) => (s.cadence === 'monthly' ? monthLabel(p) : periodLabel(p, 'quarter'));
+  const seenShort = (p: string) => seenFull(p).replace(/^(\S+) (\d{4})$/, (_, a: string, y: string) => `${a} '${y.slice(2)}`);
   const seenShown = seenPeriods.slice(-MAX_SEEN_CHIPS);
   const seenHidden = seenPeriods.length - seenShown.length;
   return (
@@ -431,12 +434,12 @@ function SubscriptionRow({
         </td>
       )}
       <td className="hidden px-4 py-2.5 text-center md:table-cell">
-        <div className="flex max-w-[200px] flex-wrap justify-center gap-1"
-          title={seenPeriods.map(seenLabel).join(', ')}>
+        <div className="flex min-w-[150px] max-w-[230px] flex-wrap justify-center gap-1"
+          title={seenPeriods.map(seenFull).join(', ')}>
           {seenShown.map(p => (
-            <span key={p} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{seenLabel(p)}</span>
+            <span key={p} className="whitespace-nowrap rounded-full bg-lime-100 px-2 py-0.5 text-[10px] font-medium leading-4 text-lime-700">{seenShort(p)}</span>
           ))}
-          {seenHidden > 0 && <span className="px-1 py-0.5 text-[10px] text-stone-400">+{seenHidden}</span>}
+          {seenHidden > 0 && <span className="px-1 py-0.5 text-[10px] leading-4 text-stone-400">+{seenHidden}</span>}
         </div>
       </td>
       <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.annualEst)}</td>
