@@ -387,6 +387,7 @@ const CADENCE_LABELS: Record<Cadence, string> = {
   monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semi-annual', annual: 'Yearly',
 };
 const CADENCE_ORDER: Cadence[] = ['monthly', 'quarterly', 'semiannual', 'annual'];
+const MAX_SEEN_CHIPS = 6;
 
 function SubscriptionRow({
   s, bills, mappedId, isSaving, onMap, onCreate, onDismiss, showNext,
@@ -402,6 +403,13 @@ function SubscriptionRow({
 }) {
   const ccBills = bills.filter(b => b.is_cc_default);
   const checkingBills = bills.filter(b => !b.is_cc_default);
+  // Monthly rows show month chips; longer cadences show quarter chips.
+  const seenPeriods = s.cadence === 'monthly'
+    ? s.periods
+    : [...new Set(s.periods.map(p => quarterKey(`${p}-01`)))];
+  const seenLabel = (p: string) => (s.cadence === 'monthly' ? monthLabel(p) : periodLabel(p, 'quarter'));
+  const seenShown = seenPeriods.slice(-MAX_SEEN_CHIPS);
+  const seenHidden = seenPeriods.length - seenShown.length;
   return (
     <tr className="hover:bg-stone-50">
       <td className="max-w-[180px] truncate px-4 py-2.5 font-medium text-stone-800" title={s.vendor}>
@@ -422,6 +430,15 @@ function SubscriptionRow({
             : <span className="text-stone-300">—</span>}
         </td>
       )}
+      <td className="hidden px-4 py-2.5 text-center md:table-cell">
+        <div className="flex max-w-[200px] flex-wrap justify-center gap-1"
+          title={seenPeriods.map(seenLabel).join(', ')}>
+          {seenShown.map(p => (
+            <span key={p} className="rounded-full bg-lime-100 px-1.5 py-0.5 text-[10px] font-medium text-lime-700">{seenLabel(p)}</span>
+          ))}
+          {seenHidden > 0 && <span className="px-1 py-0.5 text-[10px] text-stone-400">+{seenHidden}</span>}
+        </div>
+      </td>
       <td className="hidden px-4 py-2.5 text-right tabular-nums text-stone-500 sm:table-cell">{fmt(s.annualEst)}</td>
       <td className="hidden px-4 py-2.5 text-center tabular-nums text-stone-500 sm:table-cell" title={`${s.events} recurring charges (${s.charges} transactions)`}>{s.events}×</td>
       <td className="px-4 py-2.5">
@@ -615,6 +632,7 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
               <SortTh label="Typical" k="typical" className="px-4 py-2.5 text-right font-medium" />
               <SortTh label="Last seen" k="lastSeen" className="hidden px-4 py-2.5 text-left font-medium sm:table-cell" />
               {showNext && <th className="hidden px-4 py-2.5 text-left font-medium sm:table-cell">Next exp.</th>}
+              <th className="hidden px-4 py-2.5 text-center font-medium md:table-cell">Seen</th>
               <SortTh label="Annual est." k="annual" className="hidden px-4 py-2.5 text-right font-medium sm:table-cell" />
               <SortTh label="×N" k="events" className="hidden px-4 py-2.5 text-center font-medium sm:table-cell" />
               <th className="px-4 py-2.5 text-left font-medium">Acct</th>
