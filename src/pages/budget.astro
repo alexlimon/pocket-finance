@@ -8,7 +8,11 @@ import {
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
   type ResolvedBill, type BigPurchase,
 } from '../lib/budget-calc';
-import { computeCCBudgetBaseline, computeCCPaceBaseline, projectCCSpend } from '../lib/insights';
+import {
+  computeCCBudgetBaseline, computeCCPaceBaseline,
+  ccCycleSpendFromCsv, buildCCProjectionModel, projectCCSpend, describeCCProjection, fmtCurrency, fmtPct,
+} from '../lib/insights';
+import { CHECKING_LAST4 } from '../lib/subscriptions';
 
 const env = Astro.locals.runtime.env;
 if (!(await verifySession(Astro.request, env))) return Astro.redirect('/login');
@@ -58,6 +62,9 @@ const CC_BILLS_QUERY = BILLS_SELECT + ` WHERE bc.is_recurring = 1 AND bc.is_cc_d
 let savedRecurringMode: 'estimated' | 'actual' | null = null;
 let ccBudgetSummaries: { month: string; cc_budget: number }[] = [];
 let ccPaceMonthTotals: { month: string; total: number }[]    = [];
+let csvDailySpend:     { date: string; posted: string; spend: number }[] = [];
+let csvCoverage:       { first: string; last: string }[]     = [];
+let loggedBigTotals:   { month: string; total: number }[]    = [];
 let ccPaidMarkers: Set<string> = new Set();
 let ccCycleBudget: number | null = null;
 
@@ -89,7 +96,7 @@ try {
           : month;
   ccCycleNext = nextMonth(ccCycle);
 
-  const [sumRes, billRes, bigPurchasesRes, cashRes, ccCycleSumRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes] = await client.batch([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, ccCycleSumRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes, csvDailyRes, csvCoverageRes, loggedBigRes] = await client.batch([
     { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] },
     { sql: BILLS_QUERY, args: [month, month, month] },
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -123,6 +130,29 @@ try {
     { sql: `SELECT month, SUM(amount) as total FROM cc_variable_spend WHERE month < ? GROUP BY month HAVING SUM(amount) > 0 ORDER BY month DESC LIMIT 12`, args: [ccCycle] },
     // "Statement already paid" markers (`cc_paid_<card>_<YYYY-MM>`)
     { sql: `SELECT key FROM settings WHERE key LIKE 'cc_paid_%'`, args: [] },
+    // Projection: the last ~2 years of card CSVs by swipe + post date, to rebuild past cycles
+    // day by day. The two CSV queries share one window so a cycle it cuts off reads as partial.
+    {
+      sql: `SELECT date, COALESCE(post_date, date) AS posted, SUM(-amount) AS spend
+            FROM csv_transactions
+            WHERE account_last4 != ? AND date >= date('now', '-25 months')
+              AND LOWER(COALESCE(type, '')) != 'payment'
+            GROUP BY date, posted`,
+      args: [CHECKING_LAST4],
+    },
+    {
+      sql: `SELECT MIN(date) AS first, MAX(date) AS last FROM csv_transactions
+            WHERE account_last4 != ? AND date >= date('now', '-25 months')
+            GROUP BY account_last4`,
+      args: [CHECKING_LAST4],
+    },
+    // Projection: logged (not estimated) big purchases per cycle
+    {
+      sql: `SELECT month, SUM(amount) AS total FROM cc_charges
+            WHERE is_big_purchase = 1 AND COALESCE(is_estimated, 0) = 0
+            GROUP BY month`,
+      args: [],
+    },
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -162,6 +192,9 @@ try {
   ccBudgetSummaries = budgetBaselineRes.rows as unknown as typeof ccBudgetSummaries;
   ccPaceMonthTotals = paceBaselineRes.rows   as unknown as typeof ccPaceMonthTotals;
   ccPaidMarkers     = new Set(paidMarkersRes.rows.map(r => String(r.key)));
+  csvDailySpend     = csvDailyRes.rows     as unknown as typeof csvDailySpend;
+  csvCoverage       = csvCoverageRes.rows  as unknown as typeof csvCoverage;
+  loggedBigTotals   = loggedBigRes.rows    as unknown as typeof loggedBigTotals;
 } finally { client.close(); }
 
 // ── Derived data ─────────────────────────────────────────────────────────────
@@ -254,8 +287,6 @@ const paceDeltaPct      = ccPaceBaseline.nMonths >= 2 && ccPaceBaseline.avgDaily
   ? ((actualPaceRate - ccPaceBaseline.avgDailyRate) / ccPaceBaseline.avgDailyRate) * 100
   : 0;
 
-// ── CC Spend Projection ───────────────────────────────────────────────────────
-const bigPurchasesTotal = bigPurchases.reduce((s, c) => s + c.amount, 0);
 // Big purchases as % of budget (capped so ambient + big segments don't overflow)
 const ccBigPct = ccSpendBudget > 0
   ? Math.min((ccBig / ccSpendBudget) * 100, Math.max(0, 100 - ccUsedPct))
@@ -264,13 +295,22 @@ const ccBigPct = ccSpendBudget > 0
 const ccEstimatedPct = ccSpendBudget > 0
   ? Math.min((ccEstimated / ccSpendBudget) * 100, Math.max(0, 100 - ccUsedPct - ccBigPct))
   : 0;
-const projection = projectCCSpend({
-  ccUsed:            ccVariableOnly,  // ambient-only for projection rate
-  bigPurchasesTotal,
-  daysElapsed: pacingDaysElapsed,
-  totalDays:   pacingTotalDays,
-  history:     ccPaceMonthTotals,
+
+// ── CC Spend Projection ───────────────────────────────────────────────────────
+// The model is serialized onto the row so the client re-projects with the same numbers
+// as spend and big purchases are edited.
+const projectionModel = buildCCProjectionModel({
+  statementTotals: ccPaceMonthTotals,
+  loggedBig:       loggedBigTotals,
+  csvCycles:       ccCycleSpendFromCsv(csvDailySpend, csvCoverage, defaultBillingEndDay),
+  openCycle,
+  // Today isn't over and the balance syncs every 6 hours, so the spend figure covers about
+  // half of it. Counting it as a whole day under-projects the rest of the cycle.
+  daysElapsed:     Math.max(0, pacingDaysElapsed - 0.5),
+  totalDays:       pacingTotalDays,
 });
+const projectionNow = { spent: ccVariableOnly, loggedBig: ccBig - ccEstimated, plannedBig: ccEstimated };
+const projection    = projectionModel && projectCCSpend(projectionModel, projectionNow);
 ---
 
 <Layout title={label}>
@@ -707,21 +747,17 @@ const projection = projectCCSpend({
       </span>
     </div>
   )}
-  {projection.enabled && (ccCycleIsOpen || ccCycleIsFuture) && (
+  {projectionModel && projection && (ccCycleIsOpen || ccCycleIsFuture) && (
     <div class="mt-2 rounded-lg border border-surface-border bg-surface px-3 py-2.5"
       id="cc-projection-row"
-      data-history-avg={projection.historicalAvg}
-      data-history-std={projection.historicalStd}
-      data-big-total={bigPurchasesTotal}
-      data-days-elapsed={pacingDaysElapsed}
-      data-total-days={pacingTotalDays}
+      data-model={JSON.stringify(projectionModel)}
     >
       <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
         <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span class="text-xs text-stone-500">Projected this cycle:</span>
-          <span class="tabular-nums font-semibold text-stone-800" id="cc-projected-val">{fmt(projection.projected)}</span>
-          {projection.historicalStd > 0.5 && (
-            <span class="text-xs text-stone-400" id="cc-projected-band">({fmt(projection.bandLow)}–{fmt(projection.bandHigh)})</span>
+          <span class="tabular-nums font-semibold text-stone-800" id="cc-projected-val">{fmtCurrency(projection.projected)}</span>
+          {projectionModel.sigma > 0.5 && (
+            <span class="text-xs text-stone-400">80% range <span class="tabular-nums" id="cc-projected-band">{fmtCurrency(projection.bandLow)}–{fmtCurrency(projection.bandHigh)}</span></span>
           )}
         </div>
         <button id="cc-use-projection-btn"
@@ -730,7 +766,12 @@ const projection = projectCCSpend({
           data-next-month={ccCycleNext}
         >Use as budget</button>
       </div>
-      <p class="mt-1.5 text-xs text-stone-400">Blends your current pace with {projection.historyN}-mo history. Confidence grows as cycle progresses.</p>
+      <p class="mt-1.5 text-xs tabular-nums text-stone-500" id="cc-projection-breakdown">{describeCCProjection(projection, projectionNow)}</p>
+      <p class="mt-0.5 text-xs text-stone-400">
+        {pacingDaysElapsed > 0
+          ? `The days left are projected from your ${projectionModel.cycles}-cycle average, leaning ${fmtPct(projectionModel.paceWeight)} toward this cycle's pace. The range narrows as the cycle closes.`
+          : `Cycle hasn't started — projected from your ${projectionModel.cycles}-cycle average.`}
+      </p>
     </div>
   )}
   <p class="mt-1 text-xs text-stone-400">Variable spend is the full CC statement total (it already includes big purchases and recurring subscriptions, both shown separately for tracking).</p>
@@ -920,6 +961,8 @@ const projection = projectCCSpend({
 </Layout>
 
 <script>
+import { projectCCSpend, describeCCProjection, fmtCurrency, type CCProjectionModel } from '../lib/insights';
+
 const MONTH = new URLSearchParams(location.search).get('month') ??
   (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
 // The CC section runs on the statement-cycle axis, which diverges from MONTH after
@@ -1056,28 +1099,21 @@ function recomputeCC() {
     }
   }
 
-  // Live-update CC spend projection
+  // Live-update CC spend projection — same model the server rendered
   const projRow = document.getElementById('cc-projection-row') as HTMLElement | null;
-  if (projRow) {
-    const histAvg    = parseFloat(projRow.dataset.historyAvg ?? '0');
-    const histStd    = parseFloat(projRow.dataset.historyStd ?? '0');
-    const daysEl     = parseInt(projRow.dataset.daysElapsed ?? '0');
-    const totalDaysP = parseInt(projRow.dataset.totalDays ?? '30');
+  if (projRow?.dataset.model) {
+    const model = JSON.parse(projRow.dataset.model) as CCProjectionModel;
+    const now   = { spent: variableOnly, loggedBig: bigCC - estCC, plannedBig: estCC };
+    const p     = projectCCSpend(model, now);
 
-    const ambientRate = daysEl > 0 ? variableOnly / daysEl : 0;
-    const linearProj  = ambientRate * totalDaysP + bigCC;
-    const conf        = Math.min(Math.max(daysEl / Math.max(1, totalDaysP), 0), 1);
-    const projected   = (1 - conf) * histAvg + conf * linearProj;
-    const bandHalf    = 0.674 * histStd;
-
-    const projValEl  = document.getElementById('cc-projected-val');
-    const projBandEl = document.getElementById('cc-projected-band');
-    if (projValEl)  projValEl.textContent  = usd(Math.round(projected));
-    if (projBandEl && histStd > 0.5) {
-      projBandEl.textContent = `(${usd(Math.round(projected - bandHalf))}–${usd(Math.round(projected + bandHalf))})`;
-    }
+    const projValEl    = document.getElementById('cc-projected-val');
+    const projBandEl   = document.getElementById('cc-projected-band');
+    const breakdownEl  = document.getElementById('cc-projection-breakdown');
+    if (projValEl)   projValEl.textContent   = fmtCurrency(p.projected);
+    if (projBandEl)  projBandEl.textContent  = `${fmtCurrency(p.bandLow)}–${fmtCurrency(p.bandHigh)}`;
+    if (breakdownEl) breakdownEl.textContent = describeCCProjection(p, now);
     const useBtn = document.getElementById('cc-use-projection-btn') as HTMLButtonElement | null;
-    if (useBtn) useBtn.dataset.projected = String(Math.round(projected));
+    if (useBtn) useBtn.dataset.projected = String(Math.round(p.projected));
   }
 }
 

@@ -3,10 +3,11 @@
  *
  * Pure functions operating on already-fetched rows from the manual-entry budget
  * tables (monthly_summary, bill_payments × budget_config, cc_variable_spend,
- * cc_charges, cash_expenses). No DB access, no side effects.
+ * cc_charges, cash_expenses) and uploaded card CSVs (csv_transactions).
+ * No DB access, no side effects.
  */
 
-import type { MonthlySummary, CashExpense, CCCharge, BillRow } from './budget';
+import { openCycleMonth, statementWindow, type MonthlySummary, type CashExpense, type CCCharge, type BillRow } from './budget';
 
 // ── Input row shapes (as fetched by index.astro) ─────────────────────────────
 
@@ -338,50 +339,201 @@ export function projectScenario(params: {
 }
 
 // ── CC Spend Projection ──────────────────────────────────────────────────────
+//
+// Forecasts the open cycle's statement total:
+//
+//   projected = spent + planned
+//             + (1 − F) · [Z · everydayPace + (1 − Z) · everydayNorm]   everyday spend still to come
+//             + (1 − F) · bigNorm                                       big purchases still to come
+//
+//   F             share of a cycle's spend that has usually landed by today (ccCycleShare).
+//                 Spend is front-loaded — bills, and charges still pending at the cut-off,
+//                 land early — so a straight d/N line over-projects the rest of the cycle.
+//   everydayPace  this cycle's spend net of logged big purchases, scaled up by F.
+//   everydayNorm  mean closed-cycle total, less bigNorm.
+//   bigNorm       mean logged big purchases per cycle. Logged purchases are one-offs: they
+//                 count once in `spent` and are never extrapolated, so logging one moves the
+//                 projection by exactly its amount.
+//   Z             weight on this cycle's own pace, d / (d + PACE_CREDIBILITY_DAYS).
+//   planned       estimated big purchases not swiped yet, added in full.
+//
+// The band covers only what is still to come, so it closes at the cut-off:
+// ±BAND_Z · σ · √(1 − F), σ being the std-dev of the closed-cycle totals.
+//
+// The constants were fitted by replaying Jan 2025 – Aug 2026 card CSVs, forecasting every
+// day of each cycle from earlier cycles only. Blending in the same cycle a year earlier
+// made every variant worse: two years of data give each cycle one prior-year twin, and
+// those are dominated by one-offs (a move, playoff tickets), not by season.
 
-export function projectCCSpend(params: {
-  ccUsed:            number;
-  bigPurchasesTotal: number;
-  daysElapsed:       number;
-  totalDays:         number;
-  history:           { month: string; total: number }[];
-}): {
-  projected:     number;
-  bandLow:       number;
-  bandHigh:      number;
-  ambientRate:   number;
-  confidence:    number;
-  historicalAvg: number;
-  historicalStd: number;
-  historyN:      number;
-  enabled:       boolean;
-} {
-  const { ccUsed, bigPurchasesTotal, daysElapsed, totalDays, history } = params;
+/** Closed cycles averaged into the norms — a full year, so every season counts once. */
+const PRIOR_CYCLES = 12;
+/** Days of pace worth as much as the norm. Tried 10–45: lower chases noise, higher drifts low. */
+const PACE_CREDIBILITY_DAYS = 30;
+/** Band half-width in σ·√(1 − F) units. Spend is fat-tailed: the normal 1.28 covered ~75%, 1.5 covers ~80%. */
+const BAND_Z = 1.5;
+/** With fewer complete CSV cycles than this, F falls back to a straight line. */
+const MIN_CURVE_CYCLES = 6;
 
-  const eligible = history.filter(h => Number(h.total) > 0);
-  const historyN = eligible.length;
+/** One statement cycle rebuilt day by day from card CSVs. */
+export interface CCCycleSpend {
+  month: string;    // cycle key — the month the statement closes in
+  daily: number[];  // net spend per cycle day; daily[0] is the day after the previous cut-off
+}
 
-  if (historyN < 3) {
-    return { projected: 0, bandLow: 0, bandHigh: 0, ambientRate: 0, confidence: 0, historicalAvg: 0, historicalStd: 0, historyN, enabled: false };
+const epochDay = (iso: string) => {
+  const [y, m, d] = iso.split('-').map(Number);
+  return Date.UTC(y, m - 1, d) / 86_400_000;
+};
+
+/**
+ * Rebuilds statement cycles from uploaded card CSVs. A charge belongs to the cycle it POSTS
+ * in — that is what the statement shows — but sits on the day it was SWIPED, because the
+ * live balance counts pending charges: a swipe on the cut-off day that posts after it is
+ * already in the next cycle's day-1 balance. Only cycles that every card's upload fully
+ * covers are returned; a partial one would read as a cheap month.
+ */
+export function ccCycleSpendFromCsv(
+  rows:          { date: string; posted: string; spend: number }[],
+  coverage:      { first: string; last: string }[],  // upload date span, one per card
+  billingEndDay: number,
+): CCCycleSpend[] {
+  if (!coverage.length) return [];
+  const from = coverage.reduce((m, c) => (c.first > m ? c.first : m), coverage[0].first);
+  const to   = coverage.reduce((m, c) => (c.last  < m ? c.last  : m), coverage[0].last);
+
+  const cycles = new Map<string, { start: number; daily: number[] } | null>();
+  for (const r of rows) {
+    const [y, m, d] = r.posted.split('-').map(Number);
+    const month = openCycleMonth(new Date(y, m - 1, d), billingEndDay);
+    let cycle = cycles.get(month);
+    if (cycle === undefined) {
+      const { start, end } = statementWindow(month, billingEndDay);
+      cycle = start >= from && end <= to
+        ? { start: epochDay(start), daily: new Array(epochDay(end) - epochDay(start) + 1).fill(0) }
+        : null;
+      cycles.set(month, cycle);
+    }
+    if (!cycle) continue;
+    const day = Math.min(Math.max(epochDay(r.date) - cycle.start, 0), cycle.daily.length - 1);
+    cycle.daily[day] += Number(r.spend);
   }
 
-  const totals       = eligible.map(h => Number(h.total));
-  const historicalAvg = totals.reduce((s, v) => s + v, 0) / historyN;
-  const variance     = totals.reduce((s, v) => s + Math.pow(v - historicalAvg, 2), 0) / historyN;
-  const historicalStd = Math.sqrt(variance);
+  return [...cycles]
+    .flatMap(([month, c]) => (c ? [{ month, daily: c.daily }] : []))
+    .sort((a, b) => a.month.localeCompare(b.month));
+}
 
-  const ambientUsed      = Math.max(0, ccUsed - bigPurchasesTotal);
-  const ambientRate      = daysElapsed > 0 ? ambientUsed / daysElapsed : 0;
-  const linearProjection = ambientRate * totalDays + bigPurchasesTotal;
+/**
+ * F(d): share of a cycle's spend that has usually landed by the end of day `daysElapsed` of a
+ * `totalDays`-long cycle. Past cycles are stretched to the current cycle's length and pooled
+ * as a ratio of sums, so no single odd month can swing the curve.
+ */
+export function ccCycleShare(cycles: CCCycleSpend[], daysElapsed: number, totalDays: number): number {
+  let landed = 0;
+  let total  = 0;
+  for (const { daily } of cycles) {
+    const x     = Math.min(daily.length, (daysElapsed / totalDays) * daily.length);
+    const whole = Math.floor(x);
+    for (let i = 0; i < whole; i++) landed += daily[i];
+    if (whole < daily.length) landed += (x - whole) * daily[whole];
+    total += daily.reduce((s, v) => s + v, 0);
+  }
+  return total > 0 ? Math.min(Math.max(landed / total, 0), 1) : daysElapsed / totalDays;
+}
 
-  const confidence = Math.min(Math.max(daysElapsed / Math.max(1, totalDays), 0), 1);
-  const projected  = (1 - confidence) * historicalAvg + confidence * linearProjection;
+/** The parts of the projection that stay fixed while the page is open. */
+export interface CCProjectionModel {
+  share:        number;  // F
+  paceWeight:   number;  // Z
+  everydayNorm: number;
+  bigNorm:      number;
+  sigma:        number;
+  cycles:       number;  // closed cycles behind the norms
+}
 
-  const bandHalf = 0.674 * historicalStd;
-  const bandLow  = projected - bandHalf;
-  const bandHigh = projected + bandHalf;
+export interface CCProjection {
+  projected:    number;
+  bandLow:      number;
+  bandHigh:     number;
+  everydayRest: number;  // everyday spend still to come
+  bigRest:      number;  // typical big purchases still to come
+}
 
-  return { projected, bandLow, bandHigh, ambientRate, confidence, historicalAvg, historicalStd, historyN, enabled: true };
+/** Null until there are 3 closed cycles to learn from. */
+export function buildCCProjectionModel(params: {
+  statementTotals: { month: string; total: number }[];  // cc_variable_spend summed per cycle
+  loggedBig:       { month: string; total: number }[];  // logged (not estimated) big purchases per cycle
+  csvCycles:       CCCycleSpend[];
+  openCycle:       string;  // history stops before the cycle still accumulating
+  daysElapsed:     number;
+  totalDays:       number;
+}): CCProjectionModel | null {
+  const { statementTotals, loggedBig, csvCycles, openCycle, daysElapsed, totalDays } = params;
+
+  // Statement totals where recorded; CSV rebuilds (Chase cards only) for cycles before that.
+  const byMonth = new Map<string, number>();
+  for (const c of csvCycles)       byMonth.set(c.month, c.daily.reduce((s, v) => s + v, 0));
+  for (const s of statementTotals) if (Number(s.total) > 0) byMonth.set(s.month, Number(s.total));
+  const window = [...byMonth]
+    .filter(([month, total]) => month < openCycle && total > 0)
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .slice(0, PRIOR_CYCLES);
+  if (window.length < 3) return null;
+
+  const totals = window.map(([, total]) => total);
+  const norm   = totals.reduce((s, v) => s + v, 0) / totals.length;
+  const sigma  = Math.sqrt(totals.reduce((s, v) => s + (v - norm) ** 2, 0) / (totals.length - 1));
+
+  // Cycles from before big purchases were first logged still hold theirs, unlogged, inside
+  // their totals — counting them as zero would understate the norm.
+  const logged     = new Map(loggedBig.map(r => [r.month, Number(r.total)]));
+  const firstLog   = [...logged.keys()].sort()[0];
+  const loggedEra  = firstLog ? window.filter(([month]) => month >= firstLog) : [];
+  const bigNorm    = loggedEra.length
+    ? loggedEra.reduce((s, [month]) => s + (logged.get(month) ?? 0), 0) / loggedEra.length
+    : 0;
+
+  const share = csvCycles.length >= MIN_CURVE_CYCLES
+    ? ccCycleShare(csvCycles, daysElapsed, totalDays)
+    : Math.min(Math.max(daysElapsed / totalDays, 0), 1);
+
+  return {
+    share,
+    paceWeight:   daysElapsed / (daysElapsed + PACE_CREDIBILITY_DAYS),
+    everydayNorm: Math.max(0, norm - bigNorm),
+    bigNorm,
+    sigma,
+    cycles:       totals.length,
+  };
+}
+
+export function projectCCSpend(
+  model: CCProjectionModel,
+  now:   { spent: number; loggedBig: number; plannedBig: number },
+): CCProjection {
+  const { share, paceWeight, everydayNorm, bigNorm, sigma } = model;
+  const everydayPace = share > 0 ? Math.max(0, now.spent - now.loggedBig) / share : everydayNorm;
+  const everydayRest = (1 - share) * (paceWeight * everydayPace + (1 - paceWeight) * everydayNorm);
+  const bigRest      = (1 - share) * bigNorm;
+  const committed    = now.spent + now.plannedBig;
+  const projected    = committed + everydayRest + bigRest;
+  const bandHalf     = BAND_Z * sigma * Math.sqrt(1 - share);
+  return {
+    projected,
+    bandLow:  Math.max(committed, projected - bandHalf),
+    bandHigh: projected + bandHalf,
+    everydayRest,
+    bigRest,
+  };
+}
+
+/** One-line breakdown shared by the server render and the client's live re-projection. */
+export function describeCCProjection(p: CCProjection, now: { spent: number; plannedBig: number }): string {
+  const parts = [`${fmtCurrency(now.spent)} spent`];
+  if (now.plannedBig > 0)   parts.push(`${fmtCurrency(now.plannedBig)} planned`);
+  if (p.everydayRest >= 0.5) parts.push(`${fmtCurrency(p.everydayRest)} everyday spend still to come`);
+  if (p.bigRest >= 0.5)      parts.push(`${fmtCurrency(p.bigRest)} typical big purchases`);
+  return parts.join(' + ');
 }
 
 // ── CC Baseline Comparisons ──────────────────────────────────────────────────
