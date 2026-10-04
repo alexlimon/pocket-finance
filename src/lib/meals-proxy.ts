@@ -26,6 +26,9 @@ export async function proxyToMeals(request: Request, env: MealsEnv): Promise<Res
   const headers = new Headers(request.headers);
   for (const h of DROP_REQ) headers.delete(h);
   headers.set('X-Meals-Auth', env.MEALS_SHARED_SECRET);
+  // Astro's CSRF check in pocket-meals compares Origin to its own host. This app's own check has
+  // already verified the browser's Origin, so present the request as same-origin to pocket-meals.
+  if (headers.has('origin')) headers.set('origin', origin);
 
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
   let res: Response;
