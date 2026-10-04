@@ -83,6 +83,7 @@ The `monthly_summary` table is the central ledger row for each month, storing in
 - `/budget/recurring` — Manage recurring bill configurations
 - `/transactions` — Transaction feed (Plaid-based)
 - `/connect` — Plaid Link flow
+- `/food/*` — **not in this repo.** It's a reverse proxy to pocket-meals (`~/Repos/pocket-meals`, Pages project `pocket-meals`). [src/pages/food/[...path].ts](src/pages/food/[...path].ts) runs `verifySession()`, then [src/lib/meals-proxy.ts](src/lib/meals-proxy.ts) forwards the request to `MEALS_ORIGIN` with an `X-Meals-Auth: MEALS_SHARED_SECRET` header. Both env vars are set on limetiramisu. pocket-meals has its own Turso DB.
 
 ## React islands
 
