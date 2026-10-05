@@ -8,7 +8,7 @@ export type MealsEnv = Pick<CloudflareEnv, 'MEALS_ORIGIN' | 'MEALS_SHARED_SECRET
 
 /** Build assets are public in pocket-meals too — no session lookup needed for them. */
 export function isPublicMealsAsset(pathname: string): boolean {
-  return pathname.startsWith('/food/_astro/') || pathname === '/food/favicon.svg';
+  return pathname.startsWith('/food/_astro/') || pathname === '/food/favicon.svg' || pathname === '/food/apple-touch-icon.png';
 }
 
 // Hop-by-hop and encoding headers that must not be copied across the proxy.
