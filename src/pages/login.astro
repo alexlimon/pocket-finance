@@ -1,12 +1,13 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import { verifySession, hasPassword } from '../lib/auth';
+import { verifySession, hasPassword, safeNext } from '../lib/auth';
 
 const env = Astro.locals.runtime.env;
+const next = safeNext(Astro.url.searchParams.get('next'));
 
-// Already logged in → go to dashboard
+// Already logged in → go where they were headed (dashboard by default)
 if (await verifySession(Astro.request, env)) {
-  return Astro.redirect('/');
+  return Astro.redirect(next);
 }
 
 // No password set → first-time setup
@@ -34,6 +35,7 @@ const error = Astro.url.searchParams.get('error');
         )}
 
         <form action="/api/auth/login" method="POST" class="space-y-4">
+          <input type="hidden" name="next" value={next} />
           <div>
             <label for="password" class="block text-xs font-medium text-stone-500 mb-1.5">
               Household password

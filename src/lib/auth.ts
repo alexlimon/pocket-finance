@@ -10,6 +10,17 @@ export function getCookie(header: string, name: string): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+/**
+ * Post-login destination from a `next` value. Same-site paths only (a single leading
+ * `/`, no `//`, backslash or control characters), so login can't be used as an open
+ * redirect. Anything else falls back to `/`.
+ */
+export function safeNext(next: string | null | undefined): string {
+  if (!next || !next.startsWith('/') || next.startsWith('//')) return '/';
+  if (/[\\\u0000-\u001f\u007f]/.test(next)) return '/';
+  return next;
+}
+
 /** Generate a cryptographically random hex token. */
 export function randomToken(bytes = SESSION_BYTES): string {
   const arr = new Uint8Array(bytes);

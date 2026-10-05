@@ -1,19 +1,24 @@
 import type { APIContext } from 'astro';
-import { hashPassword, hasPassword, createSession } from '../../../lib/auth';
+import { hashPassword, hasPassword, createSession, safeNext } from '../../../lib/auth';
 import { getClient } from '../../../lib/db';
 
 export async function POST(context: APIContext): Promise<Response> {
   const env = context.locals.runtime.env;
 
   let password: string;
+  let next = '/';
   try {
     const form = await context.request.formData();
     password   = String(form.get('password') ?? '').trim();
+    next       = safeNext(String(form.get('next') ?? ''));
   } catch {
     return context.redirect('/login?error=1');
   }
 
-  if (!password) return context.redirect('/login?error=1');
+  // Keep the destination through a failed attempt.
+  const failed = next === '/' ? '/login?error=1' : `/login?error=1&next=${encodeURIComponent(next)}`;
+
+  if (!password) return context.redirect(failed);
 
   if (!(await hasPassword(env))) return context.redirect('/setup');
 
@@ -30,11 +35,11 @@ export async function POST(context: APIContext): Promise<Response> {
     client.close();
   }
 
-  if (!match) return context.redirect('/login?error=1');
+  if (!match) return context.redirect(failed);
 
   const cookieHeader = await createSession(env);
   return new Response(null, {
     status:  302,
-    headers: { Location: '/', 'Set-Cookie': cookieHeader },
+    headers: { Location: next, 'Set-Cookie': cookieHeader },
   });
 }
