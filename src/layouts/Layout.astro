@@ -4,6 +4,9 @@ interface Props {
   description?: string;
   showNav?:     boolean;
   wide?:        boolean;
+  /** Web-app manifest: decides what "Add to Home Screen" opens. Budget by default; the wife page passes its own. */
+  manifest?:    string;
+  appTitle?:    string;
 }
 
 const {
@@ -11,6 +14,8 @@ const {
   description = 'Your household financial planner.',
   showNav     = true,
   wide        = false,
+  manifest    = '/manifest-budget.json',
+  appTitle    = 'Budget',
 } = Astro.props;
 ---
 
@@ -25,7 +30,8 @@ const {
     <meta name="theme-color" content="#f0f1e8" />
     <meta name="color-scheme" content="light" />
     <meta name="darkreader-lock" />
-    <link rel="manifest" href="/manifest.json" />
+    <meta name="apple-mobile-web-app-title" content={appTitle} />
+    <link rel="manifest" href={manifest} />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>{title} — LimeTiramisu</title>
 
