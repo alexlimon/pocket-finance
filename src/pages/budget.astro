@@ -1972,12 +1972,14 @@ document.querySelectorAll<HTMLButtonElement>('.cc-mark-paid').forEach(btn => {
     try {
       const res = await fetch(`/api/budget/cc-sub-matches?month=${paymentMonth}`, { credentials: 'same-origin' });
       if (!res.ok) throw new Error('fetch failed');
-      const { matches } = await res.json() as { matches: Array<{ bill_id: string; matched: { date: string; amount: number } | null }> };
+      const { matches } = await res.json() as { matches: Array<{ bill_id: string; matched: { date: string; amount: number; count: number } | null }> };
       let hitCount = 0;
       for (const m of matches) {
         const hint = document.querySelector<HTMLElement>(`[data-bill-match="${m.bill_id}"]`);
         if (!hint || !m.matched) continue;
-        hint.textContent = `→ $${m.matched.amount.toFixed(2)} ${m.matched.date.slice(5)}`;
+        hint.textContent = m.matched.count > 1
+          ? `→ $${m.matched.amount.toFixed(2)} (${m.matched.count} charges)`
+          : `→ $${m.matched.amount.toFixed(2)} ${m.matched.date.slice(5)}`;
         hint.dataset.amount = String(m.matched.amount);
         hint.classList.remove('hidden');
         hitCount++;

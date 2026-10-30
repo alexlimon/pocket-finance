@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { normalizeVendor } from '../lib/vendor-match';
+import { normalizeVendor, aliasParts } from '../lib/vendor-match';
 import { detectSubscriptions, groupAlias, CHECKING_LAST4, type CadencedSubscription, type Cadence } from '../lib/subscriptions';
 import MortgageCalculator from './MortgageCalculator';
 
@@ -515,7 +515,11 @@ function SubscriptionsPanel({ txns, checkingExcluded }: { txns: CsvTransaction[]
   // normalized alias → bill_id for already-mapped bills
   const aliasToId = useMemo(() => {
     const m = new Map<string, string>();
-    for (const b of bills) { if (b.vendor_alias) m.set(b.vendor_alias, b.id); }
+    for (const b of bills) {
+      if (!b.vendor_alias) continue;
+      m.set(b.vendor_alias, b.id);
+      for (const part of aliasParts(b.vendor_alias)) m.set(part, b.id);
+    }
     return m;
   }, [bills]);
 
