@@ -859,8 +859,8 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
 
 <!-- Big Purchases -->
 <div class="mb-4 rounded-xl border border-surface-border bg-surface-card p-4 cv-auto">
-  <div class="flex items-center justify-between mb-3">
-    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400">Big Purchases</h2>
+  <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 mb-3">
+    <h2 class="text-xs font-semibold uppercase tracking-wide text-stone-400 whitespace-nowrap">Big Purchases</h2>
     <span class="text-xs text-stone-400">Estimated (🪄) reserves budget · clears when date passes</span>
   </div>
 
@@ -883,14 +883,14 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
             {charges.map(c => {
               const isEst = Number((c as any).is_estimated) === 1;
               return (
-              <div class={`flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm ${isEst ? 'bg-pink-50/40' : ''}`}
+              <div class={`flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 px-3 py-2 hover:bg-surface-hover group text-sm ${isEst ? 'bg-pink-50/40' : ''}`}
                 style={isEst ? 'border-left:2px solid #ec4899;' : ''}
                 data-cc-id={c.id} data-is-estimated={isEst ? '1' : '0'}>
-                <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">{c.date??'—'}</span>
-                <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id={c.id}>
+                <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums order-2 sm:order-none">{c.date??'—'}</span>
+                <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 min-w-0 order-2 sm:order-none sm:flex-shrink-0" data-id={c.id}>
                   {ccSettings.map(s=><option value={s.card} selected={c.card===s.card}>{s.display_name}</option>)}
                 </select>
-                <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium flex-shrink-0"
+                <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium min-w-0 order-2 sm:order-none sm:flex-shrink-0"
                   data-id={c.id}
                   style={`color:${bigPurchaseCategoryColor(c.category_id)}`}>
                   <option value="">Category</option>
@@ -898,7 +898,8 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
                     <option value={cat.id} selected={c.category_id === cat.id} style={`color:${cat.color}`}>{cat.label}</option>
                   ))}
                 </select>
-                <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id={c.id}>{c.description}</span>
+                <span class="order-1 basis-full h-0 sm:hidden" aria-hidden="true"></span>
+                <span class="editable-cc-desc min-w-0 flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id={c.id}>{c.description}</span>
                 {isEst && (
                   <span class="text-[10px] uppercase tracking-wide bg-pink-100 text-pink-600 rounded px-1 py-0.5 flex-shrink-0" title="Estimated — reserves budget, auto-expires when date passes">🪄 est</span>
                 )}
@@ -920,7 +921,7 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
   <form id="add-big-form" class="flex flex-wrap gap-2 items-end" data-month={ccCycle} data-big="1">
     <div class="flex flex-col gap-1">
       <label class="text-xs text-stone-400">Date</label>
-      <input name="date" type="date" required class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none w-36" />
+      <input name="date" type="date" required class="rounded-lg border border-surface-border bg-surface px-2 py-1.5 text-xs text-stone-600 focus:border-brand-green focus:outline-none w-36 min-h-[34px]" />
     </div>
     <div class="flex flex-col gap-1">
       <label class="text-xs text-stone-400">Card</label>
@@ -1782,13 +1783,14 @@ addBigForm?.addEventListener('submit', async e => {
     const rowBg = isEstimated ? 'bg-pink-50/40' : '';
     const estBadge = isEstimated
       ? `<span class="text-[10px] uppercase tracking-wide bg-pink-100 text-pink-600 rounded px-1 py-0.5 flex-shrink-0" title="Estimated — reserves budget, auto-expires when date passes">🪄 est</span>` : '';
-    row.className = `flex items-center gap-2 px-3 py-2 hover:bg-surface-hover group text-sm ${rowBg}`;
+    row.className = `flex flex-wrap sm:flex-nowrap items-center gap-x-2 gap-y-1 px-3 py-2 hover:bg-surface-hover group text-sm ${rowBg}`;
     row.style.borderLeft = isEstimated ? '2px solid #ec4899' : '';
     row.innerHTML = `
-      <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums">${date}</span>
-      <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 flex-shrink-0" data-id="${res.id}">${cardOptions}</select>
-      <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium flex-shrink-0" data-id="${res.id}" style="color:${catColor}">${catOptions}</select>
-      <span class="editable-cc-desc flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id="${res.id}">${desc}</span>
+      <span class="text-stone-400 text-xs w-20 flex-shrink-0 tabular-nums order-2 sm:order-none">${date}</span>
+      <select class="cc-card-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs text-stone-500 min-w-0 order-2 sm:order-none sm:flex-shrink-0" data-id="${res.id}">${cardOptions}</select>
+      <select class="cc-category-select rounded border border-surface-border bg-surface px-1.5 py-0.5 text-xs font-medium min-w-0 order-2 sm:order-none sm:flex-shrink-0" data-id="${res.id}" style="color:${catColor}">${catOptions}</select>
+      <span class="order-1 basis-full h-0 sm:hidden" aria-hidden="true"></span>
+      <span class="editable-cc-desc min-w-0 flex-1 cursor-pointer rounded px-1 hover:bg-surface-hover text-stone-700 truncate" data-id="${res.id}">${desc}</span>
       ${estBadge}
       <span class="editable-cc-amount tabular-nums cursor-pointer rounded px-1.5 hover:bg-surface-hover text-stone-700 flex-shrink-0" data-id="${res.id}">${usd(amount)}</span>
       ${isEstimated ? `<button class="cc-toggle-estimated opacity-40 can-hover:opacity-0 can-hover:group-hover:opacity-100 text-xs px-1 text-pink-500 hover:text-pink-700" data-id="${res.id}" data-est="1" title="Mark as actually purchased (removed from estimated)">✓</button>` : ''}
