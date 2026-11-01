@@ -5,7 +5,7 @@
   "start_url": "/wife",
   "scope": "/wife",
   "display": "standalone",
-  "orientation": "portrait",
+  "orientation": "any",
   "background_color": "#ffe4ef",
   "theme_color": "#ffd1dc",
   "icons": [

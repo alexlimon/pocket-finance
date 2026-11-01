@@ -3,6 +3,12 @@ export default {
   content: ['./src/**/*.{astro,html,js,jsx,md,mdx,svelte,ts,tsx,vue}'],
   theme: {
     extend: {
+      // Width alone can't tell a touch phone from a laptop: the unfolded iPhone Duo is
+      // ~890 CSS px wide, past `sm`. These key off the input device instead.
+      screens: {
+        'touch':     { raw: '(hover: none) and (pointer: coarse)' },
+        'can-hover': { raw: '(hover: hover) and (pointer: fine)' },
+      },
       colors: {
         surface: {
           DEFAULT: '#f0f1e8',      // warm sage-cream (muted, not limey)
