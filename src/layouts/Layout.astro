@@ -49,10 +49,19 @@ const {
         var base = meta && meta.content;
         var lastW = window.innerWidth;
         var standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+        // Timeline for the viewport readout (triple-tap a page title): what iOS reported, and
+        // when we stepped in. Answers "did iOS change the layout, or did we?"
+        var t0 = Date.now();
+        var log = window.__vpLog = [];
+        function note(ev, extra) {
+          log.push(String(Date.now() - t0).padStart(6) + 'ms ' + ev + ' ' + window.innerWidth + '×' + window.innerHeight + (extra || ''));
+          if (log.length > 40) log.shift();
+        }
+        note('head');
         // Side status column (folded Duo, or unfolded sideways): a right inset of 64px+ with
         // none on the left. A slab iPhone held sideways has insets on both sides, so it doesn't
         // match. Home-screen app only — in Safari that column holds Safari's own buttons.
-        function syncStrip() {
+        function syncStrip(ev) {
           if (!document.body) return;
           var probe = document.createElement('div');
           probe.style.cssText = 'position:fixed;visibility:hidden;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)';
@@ -61,21 +70,24 @@ const {
           var l = parseFloat(cs.paddingLeft) || 0, r = parseFloat(cs.paddingRight) || 0;
           probe.remove();
           var root = document.documentElement;
-          if (standalone && r >= 64 && l < 16) {
+          var on = standalone && r >= 64 && l < 16;
+          if (on) {
             root.setAttribute('data-side-strip', '');
             root.style.setProperty('--strip-w', r + 'px');
           } else {
             root.removeAttribute('data-side-strip');
           }
+          note(typeof ev === 'string' ? ev : (ev && ev.type) || 'sync', ' l' + l + ' r' + r + (on ? ' STRIP' : ''));
         }
-        document.addEventListener('DOMContentLoaded', syncStrip);
+        document.addEventListener('DOMContentLoaded', function () { syncStrip('dom'); });
+        addEventListener('load', function () { syncStrip('load'); });
         addEventListener('resize', syncStrip);
         function relayoutNav() {
           var nav = document.querySelector('.mobile-nav');
           if (nav) { nav.style.display = 'none'; void nav.offsetHeight; nav.style.display = ''; }
         }
         function kick() {
-          syncStrip();
+          syncStrip('kick');
           if (meta) {
             meta.content = base + ', minimum-scale=1'; // equivalent value; the change forces a recompute
             requestAnimationFrame(function () { meta.content = base; relayoutNav(); });
@@ -87,13 +99,16 @@ const {
           var w = window.innerWidth;
           if (!isFinite(w) || w <= 0 || w === lastW) return; // garbage, or a height-only change (keyboard)
           lastW = w;
+          // Hands off while iOS finishes launching: re-applying the viewport this early may be
+          // what pulled the page back out of the Duo's status column.
+          if (Date.now() - t0 < 2000) { note('kick-skipped'); return; }
           // iOS may still be mid-transition on the first event; nudge again as it settles.
           kick(); setTimeout(kick, 150); setTimeout(kick, 600); setTimeout(kick, 1200);
         }
         addEventListener('resize', settle);
         addEventListener('orientationchange', settle);
         addEventListener('pageshow', settle);
-        if (window.visualViewport) visualViewport.addEventListener('resize', settle);
+        if (window.visualViewport) visualViewport.addEventListener('resize', function () { syncStrip('vv-resize'); settle(); });
         document.addEventListener('visibilitychange', function () { if (!document.hidden) settle(); });
       })();
     </script>
@@ -280,6 +295,7 @@ const {
           `client    ${document.documentElement.clientWidth} × ${document.documentElement.clientHeight}`,
           `nav       ${(() => { const r = document.querySelector('.mobile-nav')?.getBoundingClientRect(); return r ? `top ${Math.round(r.top)} bottom ${Math.round(r.bottom)}` : 'n/a'; })()}`,
           `safe-area t ${inset('top')} r ${inset('right')} b ${inset('bottom')} l ${inset('left')}`,
+          '', 'timeline (ms since launch):', ...((window as any).__vpLog ?? []),
           '', 'tap to close',
         ].join('\n');
       };
@@ -290,7 +306,7 @@ const {
         if (++taps < 3) return;
         taps = 0;
         panel = document.createElement('pre');
-        panel.className = 'fixed left-2 right-2 top-2 z-[70] whitespace-pre-wrap rounded-lg bg-stone-900/90 p-3 font-mono text-[11px] leading-snug text-lime-200';
+        panel.className = 'fixed left-2 right-2 top-2 bottom-2 z-[70] overflow-y-auto whitespace-pre-wrap rounded-lg bg-stone-900/90 p-3 font-mono text-[11px] leading-snug text-lime-200';
         panel.addEventListener('click', () => { clearInterval(tick); panel?.remove(); panel = null; });
         document.body.appendChild(panel);
         render();
