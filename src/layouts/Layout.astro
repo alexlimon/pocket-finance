@@ -26,10 +26,9 @@ const {
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
     <meta name="description" content={description} />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    {/* black-translucent lets the home-screen app draw under the status bar — on the folded
-        iPhone Duo that's the right-side column, where the tab bar goes (see data-side-strip).
-        The status icons turn white, so .status-backdrop-* paints dark behind them. */}
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    {/* Not black-translucent: on the folded iPhone Duo iOS still narrows the home-screen app
+        beside its status column and reports no inset for it, so the page can't use that space. */}
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="theme-color" content="#f0f1e8" />
     <meta name="color-scheme" content="light" />
     <meta name="darkreader-lock" />
@@ -48,7 +47,6 @@ const {
         var meta = document.querySelector('meta[name="viewport"]');
         var base = meta && meta.content;
         var lastW = window.innerWidth;
-        var standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
         // Timeline for the viewport readout (triple-tap a page title): what iOS reported, and
         // when we stepped in. Answers "did iOS change the layout, or did we?"
         var t0 = Date.now();
@@ -58,36 +56,25 @@ const {
           if (log.length > 40) log.shift();
         }
         note('head');
-        // Side status column (folded Duo, or unfolded sideways): a right inset of 64px+ with
-        // none on the left. A slab iPhone held sideways has insets on both sides, so it doesn't
-        // match. Home-screen app only — in Safari that column holds Safari's own buttons.
-        function syncStrip(ev) {
+        // Log a size change along with the bottom inset (the tab bar's anchor).
+        function sample(ev) {
           if (!document.body) return;
           var probe = document.createElement('div');
-          probe.style.cssText = 'position:fixed;visibility:hidden;padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)';
+          probe.style.cssText = 'position:fixed;visibility:hidden;padding-bottom:env(safe-area-inset-bottom)';
           document.body.appendChild(probe);
-          var cs = getComputedStyle(probe);
-          var l = parseFloat(cs.paddingLeft) || 0, r = parseFloat(cs.paddingRight) || 0;
+          var b = parseFloat(getComputedStyle(probe).paddingBottom) || 0;
           probe.remove();
-          var root = document.documentElement;
-          var on = standalone && r >= 64 && l < 16;
-          if (on) {
-            root.setAttribute('data-side-strip', '');
-            root.style.setProperty('--strip-w', r + 'px');
-          } else {
-            root.removeAttribute('data-side-strip');
-          }
-          note(typeof ev === 'string' ? ev : (ev && ev.type) || 'sync', ' l' + l + ' r' + r + (on ? ' STRIP' : ''));
+          note(typeof ev === 'string' ? ev : (ev && ev.type) || 'sample', ' b' + b);
         }
-        document.addEventListener('DOMContentLoaded', function () { syncStrip('dom'); });
-        addEventListener('load', function () { syncStrip('load'); });
-        addEventListener('resize', syncStrip);
+        document.addEventListener('DOMContentLoaded', function () { sample('dom'); });
+        addEventListener('load', function () { sample('load'); });
+        addEventListener('resize', sample);
         function relayoutNav() {
           var nav = document.querySelector('.mobile-nav');
           if (nav) { nav.style.display = 'none'; void nav.offsetHeight; nav.style.display = ''; }
         }
         function kick() {
-          syncStrip('kick');
+          sample('kick');
           if (meta) {
             meta.content = base + ', minimum-scale=1'; // equivalent value; the change forces a recompute
             requestAnimationFrame(function () { meta.content = base; relayoutNav(); });
@@ -99,8 +86,8 @@ const {
           var w = window.innerWidth;
           if (!isFinite(w) || w <= 0 || w === lastW) return; // garbage, or a height-only change (keyboard)
           lastW = w;
-          // Hands off while iOS finishes launching: re-applying the viewport this early may be
-          // what pulled the page back out of the Duo's status column.
+          // Hands off while iOS finishes launching: it lays out a placeholder size first (e.g.
+          // 457×212 on the folded Duo) and resizes ~350ms in — not a fold, so no nudge needed.
           if (Date.now() - t0 < 2000) { note('kick-skipped'); return; }
           // iOS may still be mid-transition on the first event; nudge again as it settles.
           kick(); setTimeout(kick, 150); setTimeout(kick, 600); setTimeout(kick, 1200);
@@ -108,7 +95,7 @@ const {
         addEventListener('resize', settle);
         addEventListener('orientationchange', settle);
         addEventListener('pageshow', settle);
-        if (window.visualViewport) visualViewport.addEventListener('resize', function () { syncStrip('vv-resize'); settle(); });
+        if (window.visualViewport) visualViewport.addEventListener('resize', function () { sample('vv-resize'); settle(); });
         document.addEventListener('visibilitychange', function () { if (!document.hidden) settle(); });
       })();
     </script>
@@ -144,26 +131,6 @@ const {
           padding-right:  env(safe-area-inset-right);
         }
       }
-
-      /* Status bar backdrops. With black-translucent the page runs under the status bar and
-         iOS draws its icons white, so they need something dark behind them. Home-screen app
-         only; zero-size wherever there's no inset. */
-      .status-backdrop-top, .status-backdrop-side { display: none; position: fixed; background: #292524; }
-      @media (display-mode: standalone) {
-        .status-backdrop-top { display: block; top: 0; left: 0; right: 0; height: env(safe-area-inset-top); z-index: 55; }
-      }
-
-      /* Side status column (set by the head script): the tab bar moves into it, under the clock. */
-      html[data-side-strip] .status-backdrop-side { display: block; top: 0; bottom: 0; right: 0; width: var(--strip-w); z-index: 45; }
-      html[data-side-strip] .mobile-nav {
-        display: block; top: 176px; bottom: 0; left: auto; right: 0; width: var(--strip-w);
-        padding: 0 0 env(safe-area-inset-bottom); border-top: 0; background: transparent;
-      }
-      html[data-side-strip] .mobile-nav > div { flex-direction: column; justify-content: flex-start; gap: 1.25rem; padding: 0; }
-      html[data-side-strip] .mobile-nav a { color: #d6d3d1; }
-      html[data-side-strip] main { padding-bottom: 1.5rem; }
-      html[data-side-strip] #save-error-toast { bottom: 1.5rem; }
-
       /* Checkbox accent for light theme */
       input[type="checkbox"] { accent-color: #65a30d; }
 
@@ -182,8 +149,6 @@ const {
   </head>
 
   <body class="h-full bg-surface text-stone-800 antialiased">
-    <div class="status-backdrop-top" aria-hidden="true"></div>
-    <div class="status-backdrop-side" aria-hidden="true"></div>
     {showNav && (
       <>
         {/* Desktop nav */}
@@ -265,7 +230,7 @@ const {
     )}
 
     {/* Side padding clears the camera housing when the unfolded iPhone Duo is held landscape (viewport-fit=cover). */}
-    <main class={`mx-auto pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-[calc(1.25rem+env(safe-area-inset-top))] pb-24 sm:pb-6 touch:pb-24 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
+    <main class={`mx-auto pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] py-5 pb-24 sm:pb-6 touch:pb-24 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
       <slot />
     </main>
 
@@ -291,7 +256,6 @@ const {
           `screen    ${screen.width} × ${screen.height}  dpr ${devicePixelRatio}`,
           `standalone ${(navigator as any).standalone ? 'yes' : 'no'}  display-mode ${mq('(display-mode: standalone)')}`,
           `touch     ${mq('(hover: none) and (pointer: coarse)')}`,
-          `side-strip ${document.documentElement.hasAttribute("data-side-strip") ? "ON" : "off"}`,
           `client    ${document.documentElement.clientWidth} × ${document.documentElement.clientHeight}`,
           `nav       ${(() => { const r = document.querySelector('.mobile-nav')?.getBoundingClientRect(); return r ? `top ${Math.round(r.top)} bottom ${Math.round(r.bottom)}` : 'n/a'; })()}`,
           `safe-area t ${inset('top')} r ${inset('right')} b ${inset('bottom')} l ${inset('left')}`,
