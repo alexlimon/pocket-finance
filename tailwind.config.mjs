@@ -8,10 +8,6 @@ export default {
       screens: {
         'touch':     { raw: '(hover: none) and (pointer: coarse)' },
         'can-hover': { raw: '(hover: hover) and (pointer: fine)' },
-        // Folded iPhone Duo (~466 CSS px wide): wider than any slab iPhone (Pro Max is 440)
-        // and squat. The tab bar moves to a right-side rail to save height. Matched on width
-        // OR shape, since the home-screen app has no toolbars and so is taller than Safari.
-        'fold':      { raw: '(hover: none) and (pointer: coarse) and (min-width: 450px) and (max-width: 639px), (hover: none) and (pointer: coarse) and (max-width: 639px) and (min-aspect-ratio: 3/5)' },
       },
       colors: {
         surface: {
@@ -35,5 +31,10 @@ export default {
       },
     },
   },
-  plugins: [],
+  plugins: [
+    // Folded iPhone Duo: the tab bar becomes a right-side rail. Set by a script in
+    // Layout.astro, not a media query — the cover screen's viewport differs between
+    // Safari and the home-screen app, and iOS misreports sizes around a fold.
+    ({ addVariant }) => addVariant('fold', '.fold-layout &'),
+  ],
 };

@@ -35,6 +35,41 @@ const {
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>{title} — LimeTiramisu</title>
 
+    <script is:inline>
+      // Folded iPhone Duo → `fold-layout` on <html> (the tailwind `fold:` variant: side rail).
+      // Decided here, before paint, rather than by media query: the cover screen's viewport
+      // differs between Safari (382 wide, side controls) and the home-screen app, and after a
+      // fold/unfold iOS 27 standalone can report garbage sizes and skip the resize event.
+      (function () {
+        var touch = matchMedia('(hover: none) and (pointer: coarse)');
+        function sane(n) { return isFinite(n) && n > 0 && n < 5000; }
+        function apply() {
+          var w = window.innerWidth, h = window.innerHeight;
+          if (!sane(w)) return; // mid-transition garbage; a later re-check lands
+          // screen.* keeps reporting the cover display (466) even when open, and no slab
+          // iPhone's short side exceeds 440 — so 450–599 means "this is a Duo".
+          var short = Math.min(screen.width, screen.height);
+          var duo = short >= 450 && short < 600;
+          var squat = sane(h) && w / h >= 0.6;
+          var folded = touch.matches && w < 640 && (duo || squat);
+          document.documentElement.classList.toggle('fold-layout', folded);
+          // iOS can leave the fixed tab bar laid out for the old size; force a re-layout.
+          var nav = document.querySelector('.mobile-nav');
+          if (nav) { nav.style.display = 'none'; void nav.offsetHeight; nav.style.display = ''; }
+        }
+        // Resize events around a fold are unreliable, so re-check as things settle.
+        function settle() { apply(); requestAnimationFrame(apply); setTimeout(apply, 150); setTimeout(apply, 600); }
+        apply();
+        addEventListener('resize', settle);
+        addEventListener('orientationchange', settle);
+        addEventListener('pageshow', settle);
+        if (window.visualViewport) visualViewport.addEventListener('resize', settle);
+        matchMedia('(max-width: 639px)').addEventListener('change', settle);
+        document.addEventListener('visibilitychange', function () { if (!document.hidden) settle(); });
+        document.addEventListener('DOMContentLoaded', apply);
+      })();
+    </script>
+
     <link rel="preconnect" href="https://fonts.bunny.net" />
     <link
       href="https://fonts.bunny.net/css?family=inter:300,400,500,600,700&display=swap"
@@ -167,21 +202,45 @@ const {
     </main>
 
     <script>
-      // Folding/unfolding the iPhone Duo resizes the viewport under a running web app, and
-      // iOS can leave the fixed tab bar laid out for the old size. Force it to re-lay out.
-      const nav = document.querySelector<HTMLElement>('.mobile-nav');
-      if (nav) {
-        let lastW = window.innerWidth;
-        window.addEventListener('resize', () => {
-          if (window.innerWidth === lastW) return; // ignore height-only resizes (keyboard, toolbars)
-          lastW = window.innerWidth;
-          requestAnimationFrame(() => {
-            nav.style.display = 'none';
-            void nav.offsetHeight;
-            nav.style.display = '';
-          });
-        });
-      }
+      // Viewport readout: triple-tap a page title. The home-screen app has no URL bar or
+      // inspector, and its sizes differ from Safari's — this shows what iOS really reports.
+      let taps = 0, tapTimer: ReturnType<typeof setTimeout> | undefined, panel: HTMLElement | null = null, tick: ReturnType<typeof setInterval> | undefined;
+      const inset = (side: string) => {
+        const probe = document.createElement('div');
+        probe.style.cssText = `position:fixed;visibility:hidden;padding-top:env(safe-area-inset-${side})`;
+        document.body.appendChild(probe);
+        const v = getComputedStyle(probe).paddingTop;
+        probe.remove();
+        return v;
+      };
+      const render = () => {
+        if (!panel) return;
+        const vv = window.visualViewport;
+        const mq = (q: string) => (matchMedia(q).matches ? 'yes' : 'no');
+        panel.textContent = [
+          `inner     ${innerWidth} × ${innerHeight}`,
+          `visual    ${vv ? `${Math.round(vv.width)} × ${Math.round(vv.height)} @${vv.scale}` : 'n/a'}`,
+          `screen    ${screen.width} × ${screen.height}  dpr ${devicePixelRatio}`,
+          `standalone ${(navigator as any).standalone ? 'yes' : 'no'}  display-mode ${mq('(display-mode: standalone)')}`,
+          `touch     ${mq('(hover: none) and (pointer: coarse)')}`,
+          `fold-layout ${document.documentElement.classList.contains('fold-layout') ? 'ON' : 'off'}`,
+          `safe-area t ${inset('top')} r ${inset('right')} b ${inset('bottom')} l ${inset('left')}`,
+          '', 'tap to close',
+        ].join('\n');
+      };
+      document.addEventListener('click', (e) => {
+        if (!(e.target as Element).closest('h1')) return;
+        clearTimeout(tapTimer);
+        tapTimer = setTimeout(() => { taps = 0; }, 600);
+        if (++taps < 3) return;
+        taps = 0;
+        panel = document.createElement('pre');
+        panel.className = 'fixed left-2 right-2 top-2 z-[70] whitespace-pre-wrap rounded-lg bg-stone-900/90 p-3 font-mono text-[11px] leading-snug text-lime-200';
+        panel.addEventListener('click', () => { clearInterval(tick); panel?.remove(); panel = null; });
+        document.body.appendChild(panel);
+        render();
+        tick = setInterval(render, 500); // live, so a fold/unfold shows up without reopening
+      });
     </script>
   </body>
 </html>
