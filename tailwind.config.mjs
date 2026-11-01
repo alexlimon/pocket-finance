@@ -8,6 +8,9 @@ export default {
       screens: {
         'touch':     { raw: '(hover: none) and (pointer: coarse)' },
         'can-hover': { raw: '(hover: hover) and (pointer: fine)' },
+        // Folded iPhone Duo (~466×678): a squat portrait screen, unlike a normal phone's
+        // ~0.46 aspect. The tab bar moves to a right-side rail to save height.
+        'fold':      { raw: '(hover: none) and (pointer: coarse) and (max-width: 639px) and (min-aspect-ratio: 3/5)' },
       },
       colors: {
         surface: {

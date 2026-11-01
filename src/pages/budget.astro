@@ -1027,7 +1027,7 @@ function showError(msg: string) {
     toast = document.createElement('div');
     toast.id = 'save-error-toast';
     toast.setAttribute('role', 'alert');
-    toast.className = 'fixed bottom-20 sm:bottom-6 touch:bottom-20 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
+    toast.className = 'fixed bottom-20 sm:bottom-6 touch:bottom-20 fold:bottom-6 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
     document.body.appendChild(toast);
   }
   toast.textContent = msg;
@@ -1942,6 +1942,7 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
   peek.setAttribute('aria-hidden', 'true');
   peek.className = 'swipe-peek pointer-events-none fixed inset-0 z-40 flex items-center justify-center';
   peek.style.opacity = '0';
+  peek.style.visibility = 'hidden';
   peek.innerHTML = `
     <div class="swipe-card">
       <svg viewBox="0 0 64 64" width="76" height="76">
@@ -1996,6 +1997,10 @@ document.querySelectorAll<HTMLFormElement>('.add-cash-form').forEach(form => {
     peekMonth.textContent = label(toNext ? NEXT : PREV);
     peek.style.transform = `translate3d(${toNext ? x + w : x - w}px,0,0)`;
     peek.style.opacity = x ? String(Math.min(1, Math.abs(x) / (w * 0.2))) : '0';
+    // Fully out of layout when idle, so the parked peek can't widen the page. The
+    // visibility transition holds 'visible' until a spring-back's fade finishes.
+    peek.style.visibility = x ? 'visible' : 'hidden';
+    if (animate) peek.style.transition += `, visibility ${ms}ms`;
     peekRing.style.transition = animate ? `stroke-dashoffset ${ms}ms ${EASE}, stroke 0.2s` : 'stroke 0.2s';
     peekRing.style.strokeDashoffset = String(RING_C * (1 - p));
     peekCoins.forEach((c, i) => c.classList.toggle('on', p >= (i + 1) / 5));
