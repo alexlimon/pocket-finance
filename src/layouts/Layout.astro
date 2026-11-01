@@ -36,37 +36,39 @@ const {
     <title>{title} — LimeTiramisu</title>
 
     <script is:inline>
-      // Folded iPhone Duo → `fold-layout` on <html> (the tailwind `fold:` variant: side rail).
-      // Decided here, before paint, rather than by media query: the cover screen's viewport
-      // differs between Safari (382 wide, side controls) and the home-screen app, and after a
-      // fold/unfold iOS 27 standalone can report garbage sizes and skip the resize event.
+      // iPhone Duo fold/unfold in the home-screen app: iOS 27 picks up the new width but can
+      // keep the old viewport height, leaving the fixed tab bar stuck mid-screen until the
+      // phone is rotated. Rotation fixes it by re-applying the viewport, so re-apply the
+      // viewport meta ourselves whenever the width changes, then re-lay out the tab bar.
+      // Resize events around a fold are unreliable, so re-check as things settle.
       (function () {
-        var touch = matchMedia('(hover: none) and (pointer: coarse)');
-        function sane(n) { return isFinite(n) && n > 0 && n < 5000; }
-        function apply() {
-          var w = window.innerWidth, h = window.innerHeight;
-          if (!sane(w)) return; // mid-transition garbage; a later re-check lands
-          // screen.* keeps reporting the cover display (466) even when open, and no slab
-          // iPhone's short side exceeds 440 — so 450–599 means "this is a Duo".
-          var short = Math.min(screen.width, screen.height);
-          var duo = short >= 450 && short < 600;
-          var squat = sane(h) && w / h >= 0.6;
-          var folded = touch.matches && w < 640 && (duo || squat);
-          document.documentElement.classList.toggle('fold-layout', folded);
-          // iOS can leave the fixed tab bar laid out for the old size; force a re-layout.
+        var meta = document.querySelector('meta[name="viewport"]');
+        var base = meta && meta.content;
+        var lastW = window.innerWidth;
+        function relayoutNav() {
           var nav = document.querySelector('.mobile-nav');
           if (nav) { nav.style.display = 'none'; void nav.offsetHeight; nav.style.display = ''; }
         }
-        // Resize events around a fold are unreliable, so re-check as things settle.
-        function settle() { apply(); requestAnimationFrame(apply); setTimeout(apply, 150); setTimeout(apply, 600); }
-        apply();
+        function kick() {
+          if (meta) {
+            meta.content = base + ', minimum-scale=1'; // equivalent value; the change forces a recompute
+            requestAnimationFrame(function () { meta.content = base; relayoutNav(); });
+          }
+          relayoutNav();
+          window.scrollTo(window.scrollX, window.scrollY);
+        }
+        function settle() {
+          var w = window.innerWidth;
+          if (!isFinite(w) || w <= 0 || w === lastW) return; // garbage, or a height-only change (keyboard)
+          lastW = w;
+          // iOS may still be mid-transition on the first event; nudge again as it settles.
+          kick(); setTimeout(kick, 150); setTimeout(kick, 600); setTimeout(kick, 1200);
+        }
         addEventListener('resize', settle);
         addEventListener('orientationchange', settle);
         addEventListener('pageshow', settle);
         if (window.visualViewport) visualViewport.addEventListener('resize', settle);
-        matchMedia('(max-width: 639px)').addEventListener('change', settle);
         document.addEventListener('visibilitychange', function () { if (!document.hidden) settle(); });
-        document.addEventListener('DOMContentLoaded', apply);
       })();
     </script>
 
@@ -169,8 +171,8 @@ const {
         </header>
 
         {/* Mobile bottom tab bar */}
-        <nav class="mobile-nav fixed bottom-0 left-0 right-0 z-50 border-t border-surface-border bg-surface-card sm:hidden touch:block fold:top-0 fold:left-auto fold:w-16 fold:border-t-0 fold:border-l">
-          <div class="flex items-center justify-around px-2 py-2 fold:h-full fold:flex-col fold:justify-center fold:gap-5 fold:px-0">
+        <nav class="mobile-nav fixed bottom-0 left-0 right-0 z-50 border-t border-surface-border bg-surface-card sm:hidden touch:block">
+          <div class="flex items-center justify-around px-2 py-2">
             <a href="/budget" class="flex flex-col items-center gap-0.5 px-2 py-1 text-stone-500 hover:text-brand-green">
               <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M9 7h6m-6 4h6m-6 4h4M5 3h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z"/></svg>
               <span class="text-[10px] font-medium">Budget</span>
@@ -197,7 +199,7 @@ const {
     )}
 
     {/* Side padding clears the camera housing when the unfolded iPhone Duo is held landscape (viewport-fit=cover). */}
-    <main class={`mx-auto pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] py-5 pb-24 sm:pb-6 touch:pb-24 fold:pb-6 fold:pr-20 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
+    <main class={`mx-auto pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] py-5 pb-24 sm:pb-6 touch:pb-24 ${wide ? 'max-w-7xl' : 'max-w-5xl'}`}>
       <slot />
     </main>
 
@@ -223,7 +225,8 @@ const {
           `screen    ${screen.width} × ${screen.height}  dpr ${devicePixelRatio}`,
           `standalone ${(navigator as any).standalone ? 'yes' : 'no'}  display-mode ${mq('(display-mode: standalone)')}`,
           `touch     ${mq('(hover: none) and (pointer: coarse)')}`,
-          `fold-layout ${document.documentElement.classList.contains('fold-layout') ? 'ON' : 'off'}`,
+          `client    ${document.documentElement.clientWidth} × ${document.documentElement.clientHeight}`,
+          `nav       ${(() => { const r = document.querySelector('.mobile-nav')?.getBoundingClientRect(); return r ? `top ${Math.round(r.top)} bottom ${Math.round(r.bottom)}` : 'n/a'; })()}`,
           `safe-area t ${inset('top')} r ${inset('right')} b ${inset('bottom')} l ${inset('left')}`,
           '', 'tap to close',
         ].join('\n');

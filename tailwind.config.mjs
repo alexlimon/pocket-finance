@@ -31,10 +31,5 @@ export default {
       },
     },
   },
-  plugins: [
-    // Folded iPhone Duo: the tab bar becomes a right-side rail. Set by a script in
-    // Layout.astro, not a media query — the cover screen's viewport differs between
-    // Safari and the home-screen app, and iOS misreports sizes around a fold.
-    ({ addVariant }) => addVariant('fold', '.fold-layout &'),
-  ],
+  plugins: [],
 };

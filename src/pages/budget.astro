@@ -1027,7 +1027,7 @@ function showError(msg: string) {
     toast = document.createElement('div');
     toast.id = 'save-error-toast';
     toast.setAttribute('role', 'alert');
-    toast.className = 'fixed bottom-20 sm:bottom-6 touch:bottom-20 fold:bottom-6 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
+    toast.className = 'fixed bottom-20 sm:bottom-6 touch:bottom-20 left-1/2 z-[60] -translate-x-1/2 max-w-[92vw] rounded-lg bg-brand-red px-4 py-2.5 text-center text-sm text-white shadow-lg transition-opacity duration-200';
     document.body.appendChild(toast);
   }
   toast.textContent = msg;
