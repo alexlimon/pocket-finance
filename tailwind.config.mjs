@@ -8,9 +8,10 @@ export default {
       screens: {
         'touch':     { raw: '(hover: none) and (pointer: coarse)' },
         'can-hover': { raw: '(hover: hover) and (pointer: fine)' },
-        // Folded iPhone Duo (~466×678): a squat portrait screen, unlike a normal phone's
-        // ~0.46 aspect. The tab bar moves to a right-side rail to save height.
-        'fold':      { raw: '(hover: none) and (pointer: coarse) and (max-width: 639px) and (min-aspect-ratio: 3/5)' },
+        // Folded iPhone Duo (~466 CSS px wide): wider than any slab iPhone (Pro Max is 440)
+        // and squat. The tab bar moves to a right-side rail to save height. Matched on width
+        // OR shape, since the home-screen app has no toolbars and so is taller than Safari.
+        'fold':      { raw: '(hover: none) and (pointer: coarse) and (min-width: 450px) and (max-width: 639px), (hover: none) and (pointer: coarse) and (max-width: 639px) and (min-aspect-ratio: 3/5)' },
       },
       colors: {
         surface: {
