@@ -108,6 +108,17 @@ function cell(n: number): string {
   return usd0.format(Math.round(n) || 0);
 }
 
+// Averages count only elapsed months that have a value, so blank future months don't drag them down.
+const thisMonth = today.toISOString().slice(0, 7);
+function avgOf(values: number[]): number {
+  const vs = values.filter((v, i) => months[i] <= thisMonth && v !== 0);
+  return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : 0;
+}
+function avgCell(values: number[]): string {
+  const a = avgOf(values);
+  return a ? cell(a) : '—';
+}
+
 function ccSpend(month: string): number {
   const [y, mo] = month.split('-').map(Number);
   const billingCutoff = new Date(y, mo - 1, billingEndDay);
@@ -157,6 +168,7 @@ function netForMonth(month: string): number {
               <a href={`/budget?month=${months[i]}`} class="inline-block py-1 hover:text-brand-green">{m}</a>
             </th>
           ))}
+          <th class="px-3 py-3 text-right font-medium text-stone-400">Avg</th>
           <th class="px-3 py-3 text-right font-medium text-stone-400">Total</th>
         </tr>
       </thead>
@@ -174,13 +186,14 @@ function netForMonth(month: string): number {
               {values.map((v) => (
                 <td class="px-2 py-2 text-right tabular-nums text-brand-green">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums font-medium text-brand-green">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })}
 
         {/* Separator */}
-        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+        <tr><td colspan="15" class="py-0 bg-surface-hover h-px"></td></tr>
 
         {/* Checking out */}
         {(() => {
@@ -200,6 +213,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
@@ -223,6 +237,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
@@ -246,6 +261,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
@@ -269,13 +285,14 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-400">{cell(v)}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums text-stone-400">{cell(total)}</td>
             </tr>
           );
         })()}
 
         {/* Separator */}
-        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+        <tr><td colspan="15" class="py-0 bg-surface-hover h-px"></td></tr>
 
         {/* Checking After */}
         {(() => {
@@ -286,6 +303,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
             </tr>
           );
@@ -300,6 +318,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
             </tr>
           );
@@ -322,13 +341,14 @@ function netForMonth(month: string): number {
                   {v ? cell(v) : <span class="text-stone-300">—</span>}
                 </td>
               ))}
+              <td class="px-3 py-2 text-right tabular-nums text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
 
         {/* Separator before summary */}
-        <tr><td colspan="14" class="py-0 bg-surface-hover h-px"></td></tr>
+        <tr><td colspan="15" class="py-0 bg-surface-hover h-px"></td></tr>
 
         {/* Total Income summary */}
         {(() => {
@@ -340,6 +360,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? cell(total) : '—'}</td>
             </tr>
           );
@@ -355,6 +376,7 @@ function netForMonth(month: string): number {
               {values.map(v => (
                 <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs text-stone-500">{avgCell(values)}</td>
               <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? cell(total) : '—'}</td>
             </tr>
           );
@@ -372,6 +394,7 @@ function netForMonth(month: string): number {
                   {v !== 0 ? cell(v) : <span class="text-stone-300">—</span>}
                 </td>
               ))}
+              <td class={`px-3 py-2 text-right tabular-nums ${avgOf(values) > 0 ? 'text-brand-green' : avgOf(values) < 0 ? 'text-brand-red' : 'text-stone-400'}`}>{avgCell(values)}</td>
               <td class={`px-3 py-2 text-right tabular-nums ${total > 0 ? 'text-brand-green' : total < 0 ? 'text-brand-red' : 'text-stone-400'}`}>{cell(total)}</td>
             </tr>
           );
@@ -380,7 +403,7 @@ function netForMonth(month: string): number {
     </table>
   </div>
 
-  <p class="mt-3 text-xs text-stone-400">Tap any month header to open the detail view. Amounts are rounded to the dollar. Net (pre-savings) = income − fixed bills − CC spend. Saved = savings after − savings before.</p>
+  <p class="mt-3 text-xs text-stone-400">Tap any month header to open the detail view. Amounts are rounded to the dollar. Avg = mean of months so far that have a value. Net (pre-savings) = income − fixed bills − CC spend. Saved = savings after − savings before.</p>
 
   {amort.grandTotal > 0 && (
     <div class="mt-8 rounded-xl border border-surface-border bg-surface-card p-5">
