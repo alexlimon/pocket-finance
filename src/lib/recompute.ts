@@ -3,7 +3,7 @@
  *
  * Every mutation endpoint calls recomputeMonth() / recomputeMonths() after its
  * writes so the stored chain (checking_after, next month's checking_before /
- * savings_before) stays current without any read-path (page-load) writes. The
+ * savings_before / mm_before) stays current without any read-path (page-load) writes. The
  * derivation mirrors budget.astro: it runs the same pure functions over the same
  * stored inputs, so server truth and the client's DOM math can never diverge.
  *
@@ -26,30 +26,20 @@ const BILL_COLS = `bc.*,
 /** Cap on statements per write batch, so a decade-long range stays a sane payload. */
 const WRITE_CHUNK = 100;
 
-/**
- * Recompute the derived balance chain for `months`.
- *
- * Months are processed in ascending order. When a month's immediate predecessor
- * is also in the set, its freshly computed end balance — not the stale stored
- * `checking_before` — seeds it, so a whole range settles in a single pass.
- */
-export async function recomputeMonths(
-  client: Client,
-  months: string[],
-  propagateSavings = false,
-): Promise<void> {
-  const targets = [...new Set(months)].sort();
-  if (!targets.length) return;
+interface ChainInputs {
+  summaries:    Map<string, MonthlySummary & Record<string, unknown>>;
+  billsByMonth: Map<string, any[]>;
+  cashByMonth:  Map<string, { type: string; amount: number }[]>;
+}
 
-  // Successors are fetched too: a month's checking_before is part of the chain,
-  // and we only write it when the row already exists.
-  const needed  = [...new Set([...targets, ...targets.map(nextMonth)])];
+/** One batched read of everything needed to derive `targets`; `summaryMonths` may be wider. */
+async function readChainInputs(client: Client, targets: string[], summaryMonths: string[]): Promise<ChainInputs> {
   const holes   = (n: number) => new Array(n).fill('?').join(',');
 
   const [sumRes, billRes, cashRes] = await client.batch([
     {
-      sql:  `SELECT * FROM monthly_summary WHERE month IN (${holes(needed.length)})`,
-      args: needed,
+      sql:  `SELECT * FROM monthly_summary WHERE month IN (${holes(summaryMonths.length)})`,
+      args: summaryMonths,
     },
     {
       // One cross join instead of a query per month: every (month, recurring bill)
@@ -88,10 +78,57 @@ export async function recomputeMonths(
     if (list) list.push(e); else cashByMonth.set(m, [e]);
   }
 
-  const now      = currentMonth();
-  const todayDay = new Date().getDate();
+  return { summaries, billsByMonth, cashByMonth };
+}
+
+function deriveBalances(summary: MonthlySummary, month: string, inputs: ChainInputs) {
+  const resolved = resolveBillStatus(inputs.billsByMonth.get(month) ?? [], month === currentMonth(), new Date().getDate());
+  const { checkingBills } = categorizeBills(resolved);
+
+  const cf = computeCashFlow({
+    summary,
+    checkingBills,
+    ccPaymentAmount: Number(summary.cc_budget) || 0,
+    cashExpenses:    (inputs.cashByMonth.get(month) ?? []) as any,
+  });
+  return computeBalances(summary, cf.netAmount);
+}
+
+/** Read-only balances per month, derived exactly as the chain derives them. Months without a row are omitted. */
+export async function readMonthBalances(client: Client, months: string[]) {
+  const out = new Map<string, ReturnType<typeof computeBalances>>();
+  if (!months.length) return out;
+  const inputs = await readChainInputs(client, months, months);
+  for (const month of months) {
+    const summary = inputs.summaries.get(month);
+    if (summary) out.set(month, deriveBalances(summary, month, inputs));
+  }
+  return out;
+}
+
+/**
+ * Recompute the derived balance chain for `months`.
+ *
+ * Months are processed in ascending order. When a month's immediate predecessor
+ * is also in the set, its freshly computed end balance — not the stale stored
+ * `checking_before` — seeds it, so a whole range settles in a single pass.
+ */
+export async function recomputeMonths(
+  client: Client,
+  months: string[],
+  propagateSavings = false,
+): Promise<void> {
+  const targets = [...new Set(months)].sort();
+  if (!targets.length) return;
+
+  // Successors are fetched too: a month's checking_before is part of the chain,
+  // and we only write it when the row already exists.
+  const needed = [...new Set([...targets, ...targets.map(nextMonth)])];
+  const inputs = await readChainInputs(client, targets, needed);
+  const { summaries } = inputs;
+
   const writes: InStatement[] = [];
-  let carry: { month: string; checkingEnd: number } | null = null;
+  let carry: { month: string; checkingEnd: number; mmEnd: number; savingsEnd: number } | null = null;
 
   for (const month of targets) {
     const stored = summaries.get(month);
@@ -99,20 +136,16 @@ export async function recomputeMonths(
     // rather than seeding the next month off a phantom zero balance.
     if (!stored) { carry = null; continue; }
 
-    const summary = carry && nextMonth(carry.month) === month
-      ? { ...stored, checking_before: carry.checkingEnd }
+    const summary: MonthlySummary = carry && nextMonth(carry.month) === month
+      ? {
+          ...stored,
+          checking_before: carry.checkingEnd,
+          mm_before:       carry.mmEnd,
+          savings_before:  propagateSavings ? carry.savingsEnd : stored.savings_before,
+        }
       : stored;
 
-    const resolved = resolveBillStatus(billsByMonth.get(month) ?? [], month === now, todayDay);
-    const { checkingBills } = categorizeBills(resolved);
-
-    const cf = computeCashFlow({
-      summary,
-      checkingBills,
-      ccPaymentAmount: Number(summary.cc_budget) || 0,
-      cashExpenses:    (cashByMonth.get(month) ?? []) as any,
-    });
-    const { checkingEnd } = computeBalances(summary, cf.netAmount);
+    const { checkingEnd, mmEnd } = deriveBalances(summary, month, inputs);
 
     writes.push({
       sql:  'UPDATE monthly_summary SET checking_after = ? WHERE month = ?',
@@ -122,8 +155,8 @@ export async function recomputeMonths(
     const next = nextMonth(month);
     if (summaries.has(next)) {
       writes.push({
-        sql:  'UPDATE monthly_summary SET checking_before = ? WHERE month = ?',
-        args: [checkingEnd, next],
+        sql:  'UPDATE monthly_summary SET checking_before = ?, mm_before = ? WHERE month = ?',
+        args: [checkingEnd, mmEnd, next],
       });
       if (propagateSavings) {
         writes.push({
@@ -133,7 +166,7 @@ export async function recomputeMonths(
       }
     }
 
-    carry = { month, checkingEnd };
+    carry = { month, checkingEnd, mmEnd, savingsEnd: Number(summary.savings_after) || 0 };
   }
 
   for (let i = 0; i < writes.length; i += WRITE_CHUNK) {
@@ -141,7 +174,17 @@ export async function recomputeMonths(
   }
 }
 
-/** Recompute a single month's derived fields. */
-export function recomputeMonth(client: Client, month: string, propagateSavings = false): Promise<void> {
-  return recomputeMonths(client, [month], propagateSavings);
+/**
+ * Recompute a month's derived fields. From the current month on, later months are
+ * included too: a changed balance has to reach every projected sweep and money
+ * market balance after it. An edit to a past month still only reaches the next
+ * month's starts, so hand-corrected history isn't overwritten.
+ */
+export async function recomputeMonth(client: Client, month: string, propagateSavings = false): Promise<void> {
+  if (month < currentMonth()) return recomputeMonths(client, [month], propagateSavings);
+  const later = await client.execute({
+    sql:  'SELECT month FROM monthly_summary WHERE month > ? ORDER BY month',
+    args: [month],
+  });
+  return recomputeMonths(client, [month, ...later.rows.map(r => String(r.month))], propagateSavings);
 }

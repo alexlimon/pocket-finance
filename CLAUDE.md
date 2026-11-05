@@ -71,6 +71,8 @@ Two parallel data systems exist:
 
 The `monthly_summary` table is the central ledger row for each month, storing income fields, checking/savings before/after balances, and `cc_budget`. Budget page writes go through dedicated API endpoints under `src/pages/api/budget/`.
 
+**Fidelity tracking:** from November 2026, everything above `CHECKING_BUFFER` in checking is swept to the money market. `monthly_summary.to_mm` is the sweep (NULL = projected, number = actually sent), `mm_one_time` is a one-off move kept out of the sweep, and `mm_after` is a typed balance (NULL = start + one-time + sweep). `investments_value` is a typed balance that carries forward through NULL months and never affects checking, savings, NET or the sweep. `computeBalances()` in [src/lib/budget-calc.ts](src/lib/budget-calc.ts) is the source of truth. These columns were added directly to the live database by one-time scripts that contain real balances, so those scripts are gitignored and kept local: `scripts/migrate-v8.ts`, `scripts/revert-v8.ts` and `scripts/fix-history-and-2027.ts`. This repo is public: never commit real balances.
+
 **Entity concept:** `entity_id` is a string tag (`"alex"`, `"maham"`, `"household"`) used on accounts, transactions, bill configs, and cash expenses to attribute ownership. It's a filter dimension, not a foreign key — there is no entities table.
 
 **CC billing cycle:** CC charges belong to a *statement month* that may differ from the calendar month they're paid. `ccSubPaymentMonth()` in [src/lib/budget.ts](src/lib/budget.ts) maps a charge's statement month to the month it will be paid, based on `cc_settings.billing_end_day`. Always use this when linking charges to payments rather than assuming same-month.

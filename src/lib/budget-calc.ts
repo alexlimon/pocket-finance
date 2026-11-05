@@ -6,7 +6,7 @@
  */
 
 import {
-  totalIncome, prevMonth, ccSubIsInPaymentMonth,
+  totalIncome, prevMonth, ccSubIsInPaymentMonth, CHECKING_BUFFER,
   type MonthlySummary, type BillRow, type CCCharge, type CashExpense,
 } from './budget';
 
@@ -293,12 +293,15 @@ export function computeCashFlow(params: {
 
 // ── 7. computeBalances ────────────────────────────────────────────────────────
 /**
- * Projects end-of-month checking and savings balances.
+ * Projects end-of-month checking, savings and money market balances.
  *
- * checkingEnd = checkingStart + NET − savingsAllocation
+ * checkingEnd = checkingStart + NET − savingsAllocation − mmOneTime − sweep
  * savingsEnd  = savingsStart  + savingsAllocation
+ * mmEnd       = mm_after (typed) ?? mmStart + mmOneTime + sweep
  *
  * savingsAllocation is derived from the stored end balance (user edits savings_after directly).
+ * sweep is to_mm once entered; until then it projects everything above CHECKING_BUFFER.
+ * Investments are deliberately absent: they never touch checking, savings or the sweep.
  */
 export function computeBalances(summary: MonthlySummary, netAmount: number): {
   checkingStart:     number;
@@ -306,14 +309,31 @@ export function computeBalances(summary: MonthlySummary, netAmount: number): {
   savingsStart:      number;
   savingsEnd:        number;
   savingsAllocation: number;
+  mmStart:           number;
+  mmOneTime:         number;
+  sweep:             number;
+  sweepIsProjected:  boolean;
+  mmEnd:             number;
 } {
   const checkingStart     = Number(summary.checking_before);
   const savingsStart      = Number(summary.savings_before);
   const savingsAllocation = Number(summary.savings_after) - savingsStart;
-  const checkingEnd       = checkingStart + netAmount - savingsAllocation;
   const savingsEnd        = savingsStart + savingsAllocation;
 
-  return { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation };
+  const mmStart          = Number(summary.mm_before) || 0;
+  const mmOneTime        = Number(summary.mm_one_time) || 0;
+  const available        = checkingStart + netAmount - savingsAllocation - mmOneTime;
+  const sweepIsProjected = summary.to_mm === null || summary.to_mm === undefined;
+  const sweep            = sweepIsProjected ? Math.max(0, available - CHECKING_BUFFER) : Number(summary.to_mm);
+  const checkingEnd      = available - sweep;
+  const mmEnd            = summary.mm_after === null || summary.mm_after === undefined
+    ? mmStart + mmOneTime + sweep
+    : Number(summary.mm_after);
+
+  return {
+    checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation,
+    mmStart, mmOneTime, sweep, sweepIsProjected, mmEnd,
+  };
 }
 
 // ── 8. subBillingMonth ────────────────────────────────────────────────────────

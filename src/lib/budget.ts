@@ -32,6 +32,13 @@ export function bigPurchaseCategoryColor(id: string | null | undefined): string 
  */
 export const CC_BUDGET_LATCH_PREFIX = 'cc_budget_manual_';
 
+/** Checking keeps this much at month-end; everything above it is swept to the money market. */
+export const CHECKING_BUFFER = 8000;
+
+/** Latest typed investments balance at or before a month; blank months carry it forward. */
+export const LATEST_INVESTMENTS_SQL =
+  'SELECT investments_value FROM monthly_summary WHERE month <= ? AND investments_value IS NOT NULL ORDER BY month DESC LIMIT 1';
+
 export interface MonthlySummary {
   month:           string;
   income_alex:     number;
@@ -43,6 +50,11 @@ export interface MonthlySummary {
   savings_after:   number;
   cc_budget:       number;
   notes:           string | null;
+  mm_before?:         number | null;
+  mm_one_time?:       number | null;  // one-time move from checking; not part of the monthly sweep
+  to_mm?:             number | null;  // monthly sweep: NULL = projected, number = actually sent
+  mm_after?:          number | null;  // typed balance: NULL = start + one-time + sweep
+  investments_value?: number | null;  // typed balance: NULL = carry the last typed value forward
 }
 
 export interface BillConfig {

@@ -1,6 +1,7 @@
 import { getClient, type Env } from './db';
 import { aggregateMonth, type BillAggRow, type VariableSpendRow, type MonthAggregate } from './insights';
 import type { MonthlySummary, CCCharge, CashExpense } from './budget';
+import { LATEST_INVESTMENTS_SQL } from './budget';
 
 type BillConfig = {
   id:             string;
@@ -21,7 +22,7 @@ type BillPayRow = {
 export interface Snapshot {
   asOf:     string;
   currency: 'USD';
-  balances: { checking: number; savings: number; totalLiquid: number };
+  balances: { checking: number; savings: number; totalLiquid: number; moneyMarket: number; investments: number };
   current: {
     month:   string;
     partial: boolean;
@@ -66,9 +67,10 @@ export async function buildSnapshot(env: Env): Promise<Snapshot> {
   let varSpend:    VariableSpendRow[]= [];
   let bigCharges:  CCCharge[]       = [];
   let cashRows:    CashExpense[]    = [];
+  let investmentsNow = 0;
 
   try {
-    const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes] = await Promise.all([
+    const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes, investmentsRes] = await Promise.all([
       client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month >= ? ORDER BY month', args: [startMonth] }),
       client.execute({
         sql: `SELECT bp.month, bp.bill_id, bp.amount, COALESCE(bp.is_skipped, 0) as is_skipped
@@ -81,6 +83,7 @@ export async function buildSnapshot(env: Env): Promise<Snapshot> {
       client.execute({ sql: 'SELECT month, card, amount FROM cc_variable_spend WHERE month >= ?', args: [startMonth] }),
       client.execute({ sql: 'SELECT * FROM cc_charges WHERE month >= ? AND is_big_purchase = 1', args: [startMonth] }),
       client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month >= ?', args: [startMonth] }),
+      client.execute({ sql: LATEST_INVESTMENTS_SQL, args: [currentMonth] }),
     ]);
 
     summaries   = sumRes.rows     as unknown as MonthlySummary[];
@@ -89,6 +92,7 @@ export async function buildSnapshot(env: Env): Promise<Snapshot> {
     varSpend    = varRes.rows     as unknown as VariableSpendRow[];
     bigCharges  = ccRes.rows      as unknown as CCCharge[];
     cashRows    = cashRes.rows    as unknown as CashExpense[];
+    if (investmentsRes.rows.length) investmentsNow = Number((investmentsRes.rows[0] as any).investments_value);
   } finally {
     client.close();
   }
@@ -147,6 +151,10 @@ export async function buildSnapshot(env: Env): Promise<Snapshot> {
     ? (Number(latestSummary.savings_after) || Number(latestSummary.savings_before) || 0)
     : 0;
 
+  const moneyMarketNow = latestSummary
+    ? Number(latestSummary.mm_after ?? latestSummary.mm_before ?? 0)
+    : 0;
+
   const currentSummary = sumMap.get(currentMonth) ?? null;
   const partial = !currentSummary || !Number(currentSummary.checking_after);
 
@@ -196,6 +204,8 @@ export async function buildSnapshot(env: Env): Promise<Snapshot> {
       checking:    Math.round(checkingNow),
       savings:     Math.round(savingsNow),
       totalLiquid: Math.round(checkingNow + savingsNow),
+      moneyMarket: Math.round(moneyMarketNow),
+      investments: Math.round(investmentsNow),
     },
     current: {
       month:   currentMonth,

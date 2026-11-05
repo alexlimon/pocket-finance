@@ -8,7 +8,7 @@ import {
   fmtCurrency, fmtPct,
   type BillAggRow, type VariableSpendRow, type MonthAggregate, type MonthBaseline,
 } from '../lib/insights';
-import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
+import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, LATEST_INVESTMENTS_SQL, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 const env = Astro.locals.runtime.env;
@@ -37,10 +37,10 @@ let billConfigs: BillConfig[]     = [];
 let varSpend: VariableSpendRow[]  = [];
 let bigCharges: CCCharge[]        = [];
 let cashRows: CashExpense[]       = [];
-let reserveAccounts: Array<{ type: string; current_balance: number }> = [];
+let investments = 0;
 
 try {
-  const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes, acctRes] = await Promise.all([
+  const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes, investmentsRes] = await Promise.all([
     // All monthly_summary rows from 12mo ago through end of year
     client.execute({ sql: 'SELECT * FROM monthly_summary WHERE month >= ? ORDER BY month', args: [startMonth] }),
     // bill_payments joined with budget_config for lookup
@@ -57,7 +57,7 @@ try {
     client.execute({ sql: 'SELECT month, card, amount FROM cc_variable_spend WHERE month >= ?', args: [startMonth] }),
     client.execute({ sql: 'SELECT * FROM cc_charges WHERE month >= ? AND is_big_purchase = 1', args: [startMonth] }),
     client.execute({ sql: 'SELECT * FROM cash_expenses WHERE month >= ?', args: [startMonth] }),
-    client.execute("SELECT type, current_balance FROM accounts WHERE is_active = 1 AND type IN ('savings','investment')").catch(() => ({ rows: [] })),
+    client.execute({ sql: LATEST_INVESTMENTS_SQL, args: [thisMonth] }),
   ]);
 
   summaries       = sumRes.rows     as unknown as MonthlySummary[];
@@ -66,7 +66,7 @@ try {
   varSpend        = varRes.rows     as unknown as VariableSpendRow[];
   bigCharges      = ccRes.rows      as unknown as CCCharge[];
   cashRows        = cashRes.rows    as unknown as CashExpense[];
-  reserveAccounts = acctRes.rows    as unknown as typeof reserveAccounts;
+  if (investmentsRes.rows.length) investments = Number((investmentsRes.rows[0] as any).investments_value);
 } finally {
   client.close();
 }
@@ -210,9 +210,10 @@ const checking = currentSummary ? Number(currentSummary.checking_before) : 0;
 const savings  = currentSummary ? Number(currentSummary.savings_before)  : 0;
 const totalLiquid = checking + savings;
 
-const reserves = reserveAccounts.length > 0
-  ? reserveAccounts.reduce((s, a) => s + (a.current_balance ?? 0), 0)
-  : savings;
+// Typed balance if there is one, otherwise the start, matching the other balance cards.
+const moneyMarket = currentSummary ? Number(currentSummary.mm_after ?? currentSummary.mm_before ?? 0) : 0;
+// Investments are volatile, so they don't count as reserves.
+const reserves = savings + moneyMarket;
 
 // ── Sparkline geometry ───────────────────────────────────────────────────────
 const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
@@ -362,6 +363,18 @@ const baseLabel =
       <p class={`mt-1 text-lg font-semibold tabular-nums ${totalLiquid >= 0 ? 'text-brand-green' : 'text-brand-red'}`}>
         {fmtCurrency(totalLiquid)}
       </p>
+    </div>
+  </div>
+
+  <!-- ── Fidelity ── -->
+  <div class="mb-6 grid grid-cols-2 gap-3">
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Money Market</p>
+      <p class="mt-1 text-lg font-semibold tabular-nums text-brand-green">{fmtCurrency(moneyMarket)}</p>
+    </div>
+    <div class="rounded-xl border border-surface-border bg-surface-card p-4">
+      <p class="text-xs text-stone-400">Investments</p>
+      <p class="mt-1 text-lg font-semibold tabular-nums text-brand-green">{fmtCurrency(investments)}</p>
     </div>
   </div>
 

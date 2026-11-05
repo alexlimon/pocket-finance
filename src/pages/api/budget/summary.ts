@@ -19,6 +19,7 @@ export async function POST(context: APIContext): Promise<Response> {
     'income_alex','income_maham','income_other',
     'checking_before','checking_after','savings_before','savings_after',
     'cc_budget','notes',
+    'mm_before','mm_one_time','to_mm','mm_after','investments_value',
   ]);
 
   const sets: string[] = [];

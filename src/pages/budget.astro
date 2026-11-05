@@ -2,7 +2,7 @@
 import Layout from '../layouts/Layout.astro';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
-import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, openCycleMonth, cycleRangeLabel, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
+import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, openCycleMonth, cycleRangeLabel, LATEST_INVESTMENTS_SQL, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
   computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
@@ -67,6 +67,7 @@ let csvCoverage:       { first: string; last: string }[]     = [];
 let loggedBigTotals:   { month: string; total: number }[]    = [];
 let ccPaidMarkers: Set<string> = new Set();
 let ccCycleBudget: number | null = null;
+let investmentsShown = 0;
 
 // ── Billing-cycle axis ───────────────────────────────────────────────────────
 // The page runs on two clocks. `month` is the CALENDAR month and drives income,
@@ -171,11 +172,16 @@ try {
       checking_after:  Number(p.checking_after),
       savings_before:  Number(p.savings_after),
       savings_after:   Number(p.savings_after),
+      // A projected sweep isn't stored, so an unsaved month only carries recorded amounts.
+      mm_before:       p.mm_after ?? (Number(p.mm_before) || 0) + (Number(p.mm_one_time) || 0) + (Number(p.to_mm) || 0),
       income_alex:     Number(p.income_alex),
       income_maham:    Number(p.income_maham),
       income_other:    Number(p.income_other),
     };
   }
+
+  const investmentsRes = await client.execute({ sql: LATEST_INVESTMENTS_SQL, args: [month] });
+  if (investmentsRes.rows.length) investmentsShown = Number((investmentsRes.rows[0] as any).investments_value);
 
   if (nextSumRes.rows.length) {
     nextMonthCCBudget = Number((nextSumRes.rows[0] as any).cc_budget) || null;
@@ -257,7 +263,7 @@ const variableUpdatedAt = new Map(variableSpendRows.map(r => [r.card, r.balance_
 // must not touch this month's budget.
 const ccPaidKeys    = new Set([...ccPaidMarkers].map(k => k.slice('cc_paid_'.length)));
 const ccPaymentPaid = ccSettings.some(s => ccPaidKeys.has(`${s.card}_${prev}`));
-const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation } = balances;
+const { checkingStart, checkingEnd, savingsStart, savingsEnd, savingsAllocation, mmStart, mmOneTime, sweep, sweepIsProjected, mmEnd } = balances;
 
 // ── CC statement pacing ───────────────────────────────────────────────────────
 // Pacing runs on the cycle axis: cycle M spans (M-1, endDay+1) → (M, endDay).
@@ -429,12 +435,60 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
           <span class={`tabular-nums ${netAmount >= 0 ? 'text-brand-green' : 'text-brand-red'}`} id="cf-checking-net">{fmt(netAmount)}</span>
         </div>
         <div class="flex items-center justify-between text-sm mt-1 text-xs text-stone-400">
-          <span>- To savings</span>
-          <span class="tabular-nums" id="checking-savings-deduct">-{fmt(savingsAllocation)}</span>
+          <span>{savingsAllocation < 0 ? '+ From savings' : '- To savings'}</span>
+          <span class="tabular-nums" id="checking-savings-deduct">{fmt(-savingsAllocation, { sign: true })}</span>
+        </div>
+        {mmOneTime !== 0 && (
+          <div class="flex items-center justify-between text-sm mt-1 text-xs text-stone-400">
+            <span>- One-time move</span>
+            <span class="tabular-nums">-{fmt(mmOneTime)}</span>
+          </div>
+        )}
+        <div class="flex items-center justify-between text-sm mt-1 text-xs text-stone-400">
+          <span>- To money market</span>
+          <span class="tabular-nums" id="checking-sweep-deduct">-{fmt(sweep)}</span>
         </div>
         <div class="flex items-center justify-between text-sm mt-1 pt-1 border-t border-surface-border">
           <span class="text-stone-600 font-medium">End</span>
           <span class={`tabular-nums font-semibold ${checkingEnd >= 0 ? 'text-stone-800' : 'text-brand-red'}`} id="checking-end-val">{fmt(checkingEnd)}</span>
+        </div>
+      </div>
+
+      <!-- Money market -->
+      <div class="rounded-lg border border-surface-border bg-surface p-3">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold uppercase tracking-wide text-stone-400">Money Market</span>
+        </div>
+        <div class="flex items-center justify-between text-sm">
+          <span class="text-stone-500">Start</span>
+          <span class="balance-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-600 text-xs"
+            data-field="mm_before" data-value={mmStart} data-label="the money market start">{fmt(mmStart)}</span>
+        </div>
+        {mmOneTime !== 0 && (
+          <div class="flex items-center justify-between text-sm mt-1">
+            <span class="text-stone-500">One-time move</span>
+            <span class="balance-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800 font-medium"
+              data-field="mm_one_time" data-value={mmOneTime} data-label="the one-time move">{fmt(mmOneTime)}</span>
+          </div>
+        )}
+        <div class="flex items-center justify-between text-sm mt-1">
+          <span class="text-stone-500">Monthly sweep{sweepIsProjected && <span class="ml-1 text-xs text-stone-400">projected</span>}</span>
+          <span class="balance-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover text-stone-800 font-medium" id="mm-sweep-val"
+            data-field="to_mm" data-value={summary.to_mm ?? ''} data-placeholder={sweep.toFixed(2)} data-blank-is-null="1" data-label="the monthly sweep">{fmt(sweep)}</span>
+        </div>
+        <div class="flex items-center justify-between text-sm mt-1 pt-1 border-t border-surface-border">
+          <span class="text-stone-600 font-medium">End{summary.mm_after != null && <span class="ml-1 text-xs font-normal text-stone-400">typed</span>}</span>
+          <span class="balance-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover font-semibold text-stone-800" id="mm-end-val"
+            data-field="mm_after" data-value={summary.mm_after ?? ''} data-placeholder={mmEnd.toFixed(2)} data-blank-is-null="1" data-label="the money market balance">{fmt(mmEnd)}</span>
+        </div>
+      </div>
+
+      <!-- Investments -->
+      <div class="rounded-lg border border-surface-border bg-surface p-3">
+        <div class="flex items-center justify-between text-sm">
+          <span class="text-xs font-semibold uppercase tracking-wide text-stone-400">Investments{summary.investments_value == null && <span class="ml-1 font-normal normal-case tracking-normal text-stone-400">carried forward</span>}</span>
+          <span class="balance-edit tabular-nums cursor-pointer rounded px-2 py-0.5 hover:bg-surface-hover font-semibold text-stone-800"
+            data-field="investments_value" data-value={summary.investments_value ?? ''} data-placeholder={investmentsShown.toFixed(2)} data-blank-is-null="1" data-label="the investments value">{fmt(investmentsShown)}</span>
         </div>
       </div>
     </div>
@@ -789,6 +843,10 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
   data-income-total={incomeTotal + otherCashIncomeTotal}
   data-checking-start={checkingStart}
   data-savings-allocation={savingsAllocation}
+  data-mm-start={mmStart}
+  data-mm-one-time={mmOneTime}
+  data-to-mm={summary.to_mm ?? ''}
+  data-mm-after={summary.mm_after ?? ''}
   data-mode={ccDisplayMode}
 >
   <div class="flex items-center justify-between mb-3">
@@ -997,6 +1055,8 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
 
 <script>
 import { projectCCSpend, describeCCProjection, fmtCurrency, type CCProjectionModel } from '../lib/insights';
+import { computeBalances } from '../lib/budget-calc';
+import type { MonthlySummary } from '../lib/budget';
 
 const MONTH = new URLSearchParams(location.search).get('month') ??
   (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; })();
@@ -1192,7 +1252,17 @@ function recalcCashFlow(recurringVal: number) {
   // recurring shown only as a breakdown, never added on top.
   const ccPayment  = ccVarBudget;
   const net        = incomeTotal - fixedChecking - ccPayment - otherCashExpense;
-  const checkEnd   = checkStart + net - savingsAlloc;
+  const nullable  = (v: string | undefined) => (v === undefined || v === '' ? null : parseFloat(v));
+  const projected = computeBalances({
+    checking_before: checkStart,
+    savings_before:  0,
+    savings_after:   savingsAlloc,
+    mm_before:       parseFloat(sec.dataset.mmStart ?? '0'),
+    mm_one_time:     parseFloat(sec.dataset.mmOneTime ?? '0'),
+    to_mm:           nullable(sec.dataset.toMm),
+    mm_after:        nullable(sec.dataset.mmAfter),
+  } as MonthlySummary, net);
+  const checkEnd = projected.checkingEnd;
 
   // Update all affected elements
   const u = (id: string, v: number, prefix = '') => {
@@ -1204,6 +1274,9 @@ function recalcCashFlow(recurringVal: number) {
   u('cf-net',           net);
   u('cf-checking-net',  net);
   u('checking-end-val', checkEnd);
+  u('checking-sweep-deduct', projected.sweep, '-');
+  u('mm-sweep-val',     projected.sweep);
+  u('mm-end-val',       projected.mmEnd);
   u('fb-cc-payment',    ccPayment);
   u('fb-total-checking', fixedChecking + ccPayment);
 
@@ -1483,30 +1556,47 @@ document.querySelectorAll<HTMLElement>('.savings-allocation-edit').forEach(el =>
         await api('/api/budget/summary', 'POST', { month: MONTH, savings_after: newSavingsAfter });
       } catch (err) {
         el.textContent = usd(cur);
-        const savEndEl = document.getElementById('savings-end-val');
-        if (savEndEl) savEndEl.textContent = usd(savingsStart + cur);
-        const deductEl = document.getElementById('checking-savings-deduct');
-        if (deductEl) deductEl.textContent = '-' + usd(cur);
         showSaveError(err, 'the savings transfer');
         return;
       }
-      // Update DOM: savings end
-      const savEndEl = document.getElementById('savings-end-val');
-      if (savEndEl) savEndEl.textContent = usd(newSavingsAfter);
-      // Update DOM: checking end = checking_start + NET - savings_allocation
-      const checkStart = parseFloat(document.querySelector('[data-field="checking_before"]')?.textContent?.replace(/[$,]/g,'') ?? '0');
-      // Parse NET from the NET display
-      const netEl = document.querySelector('[data-net-amount]') as HTMLElement;
-      const netVal = netEl ? parseFloat(netEl.dataset.netAmount ?? '0') : 0;
-      const newCheckEnd = checkStart + netVal - v;
-      const checkEndEl = document.getElementById('checking-end-val');
-      if (checkEndEl) { checkEndEl.textContent = usd(newCheckEnd); checkEndEl.className = checkEndEl.className.replace(/text-brand-\w+|text-stone-800/g, '') + (newCheckEnd >= 0 ? ' text-stone-800' : ' text-brand-red'); }
-      // Update deduction display
-      const deductEl = document.getElementById('checking-savings-deduct');
-      if (deductEl) deductEl.textContent = '-' + usd(v);
+      // The sweep and money market depend on this, so take them from the server.
+      location.reload();
     }
     inp.addEventListener('blur', save);
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { el.textContent = usd(cur); inp.replaceWith(el); } });
+  });
+});
+
+// ── Money market / investments edit ─────────────────────────────────────────
+// Saves through the summary endpoint, then reloads so every balance that depends
+// on the value comes from the server. Clearing a nullable field returns it to its
+// calculated value.
+document.querySelectorAll<HTMLElement>('.balance-edit').forEach(el => {
+  el.addEventListener('click', () => {
+    const { field, value = '', placeholder = '', blankIsNull, label = 'the balance' } = el.dataset;
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = '0.01'; inp.value = value; inp.placeholder = placeholder;
+    inp.className = 'w-28 rounded border border-brand-green bg-white px-2 py-0.5 text-sm tabular-nums focus:outline-none';
+    el.replaceWith(inp); inp.focus(); inp.select();
+    let done = false;
+    async function save() {
+      if (done) return; done = true;
+      const raw = inp.value.trim();
+      if (raw === value || (raw !== '' && parseFloat(raw) === parseFloat(value))) { inp.replaceWith(el); return; }
+      const next = raw === '' ? (blankIsNull ? null : 0) : parseFloat(raw);
+      try {
+        await api('/api/budget/summary', 'POST', { month: MONTH, [field!]: next });
+        location.reload();
+      } catch (err) {
+        inp.replaceWith(el);
+        showSaveError(err, label);
+      }
+    }
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') save();
+      if (e.key === 'Escape') { done = true; inp.replaceWith(el); }
+    });
   });
 });
 

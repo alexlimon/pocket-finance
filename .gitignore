@@ -28,3 +28,8 @@ Thumbs.db
 
 # Database backups — plaintext financial data, never commit
 backups/
+
+# One-time data scripts containing real balances, kept local only
+scripts/migrate-v8.ts
+scripts/revert-v8.ts
+scripts/fix-history-and-2027.ts

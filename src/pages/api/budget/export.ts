@@ -82,6 +82,13 @@ export async function GET(context: APIContext): Promise<Response> {
   rows.push(['Savings']);
   rows.push(dataRow('Before', '', months.map(m => sumOf(m,'savings_before') || '')));
   rows.push(dataRow('After',  '', months.map(m => sumOf(m,'savings_after')  || '')));
+  rows.push(['Money Market']);
+  rows.push(dataRow('Start',        '', months.map(m => sumOf(m,'mm_before')   || '')));
+  rows.push(dataRow('One-time',     '', months.map(m => sumOf(m,'mm_one_time') || '')));
+  rows.push(dataRow('Sweep sent',   '', months.map(m => sumOf(m,'to_mm')       || '')));
+  rows.push(dataRow('Typed balance','', months.map(m => sumOf(m,'mm_after')    || '')));
+  rows.push(['Investments']);
+  rows.push(dataRow('Typed balance','', months.map(m => sumOf(m,'investments_value') || '')));
   rows.push([]);
 
   // Income
