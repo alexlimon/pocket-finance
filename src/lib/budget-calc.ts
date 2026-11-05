@@ -108,6 +108,7 @@ export function computeCCPayment(params: {
   billingEndDay:   number;
   paymentMonth:    string;   // the month whose payment we're computing (= current month)
   ccVariableBudget: number;  // summary.cc_budget for this month (full statement total)
+  recurringEstimate: number | null;  // see computeRecurringEstimate; null falls back to monthly targets
 }): {
   ccBillsForPayment:          ResolvedBill[];
   estimatedPaymentRecurring:  number;
@@ -116,14 +117,14 @@ export function computeCCPayment(params: {
   recurringBudget:            number;
   ccPaymentAmount:            number;
 } {
-  const { ccBills, billingEndDay, paymentMonth, ccVariableBudget } = params;
+  const { ccBills, billingEndDay, paymentMonth, ccVariableBudget, recurringEstimate } = params;
 
   // Subs whose billing cycle closed before this month's payment date
   const ccBillsForPayment = ccBills.filter(b =>
     ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, billingEndDay, paymentMonth)
   );
 
-  const estimatedPaymentRecurring = ccBillsForPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
+  const estimatedPaymentRecurring = recurringEstimate ?? ccBillsForPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
   const actualPaymentRecurring    = ccBillsForPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
 
   const allChecked    = ccBillsForPayment.length > 0 && ccBillsForPayment.every(b => b.effective_paid);
@@ -169,6 +170,7 @@ export function computeCCSpendingTracker(params: {
   nextMonthCCBudget:  number | null;
   currentCCBudget:    number;
   savedDisplayMode?:  'estimated' | 'actual' | null;
+  recurringEstimate:  number | null;  // see computeRecurringEstimate; null falls back to monthly targets
 }): {
   ccBillsNextPayment:  ResolvedBill[];
   skippedCCBillsNextPayment: ResolvedBill[];
@@ -203,7 +205,7 @@ export function computeCCSpendingTracker(params: {
     ccSubIsInPaymentMonth(b.due_day ? Number(b.due_day) : null, billingEndDay, nextMonth)
   );
 
-  const estimatedCCRecurring   = ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
+  const estimatedCCRecurring   = params.recurringEstimate ?? ccBillsNextPayment.reduce((s, b) => s + Number(b.monthly_target ?? 0), 0);
   const actualCCRecurring      = ccBillsNextPayment.filter(b => b.effective_paid).reduce((s, b) => s + b.actual_amount, 0);
   const allCCRecurringChecked  = ccBillsNextPayment.length > 0 && ccBillsNextPayment.every(b => b.effective_paid);
   const ccDisplayMode          = (params.savedDisplayMode ?? (allCCRecurringChecked ? 'actual' : 'estimated')) as 'estimated' | 'actual';
@@ -351,4 +353,25 @@ export function subBillingMonth(
 ): string | null {
   if (!bill.due_day) return null;
   return Number(bill.due_day) <= billingEndDay ? currentMonth : prevMonth(currentMonth);
+}
+
+// ── 9. computeRecurringEstimate ───────────────────────────────────────────────
+/**
+ * The overall "est" CC recurring figure: the average of the last 2 monthly recurring
+ * totals before `paymentMonth`. Returns null when there is no history.
+ *
+ * `monthTotals` is the sum of paid subs per pay month, newest first, closed statements
+ * only. Individual subscription rows don't use this; they keep their own amounts.
+ */
+const RECURRING_ESTIMATE_WINDOW = 2;
+
+export function computeRecurringEstimate(
+  monthTotals:  { month: string; total: number }[],
+  paymentMonth: string,
+): number | null {
+  const recent = monthTotals
+    .filter(t => t.month < paymentMonth)
+    .slice(0, RECURRING_ESTIMATE_WINDOW);
+  if (!recent.length) return null;
+  return recent.reduce((s, t) => s + Number(t.total), 0) / recent.length;
 }

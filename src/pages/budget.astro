@@ -5,7 +5,7 @@ import { getClient } from '../lib/db';
 import { fmt, monthLabel, prevMonth, nextMonth, currentMonth, openCycleMonth, cycleRangeLabel, LATEST_INVESTMENTS_SQL, BIG_PURCHASE_CATEGORIES, bigPurchaseCategoryColor, type MonthlySummary, type CCCharge, type CashExpense } from '../lib/budget';
 import {
   resolveBillStatus, categorizeBills, groupBigPurchasesByPayMonth,
-  computeCCPayment, computeCCSpendingTracker, computeCashFlow, computeBalances, subBillingMonth,
+  computeCCPayment, computeCCSpendingTracker, computeRecurringEstimate, computeCashFlow, computeBalances, subBillingMonth,
   type ResolvedBill, type BigPurchase,
 } from '../lib/budget-calc';
 import {
@@ -65,6 +65,7 @@ let ccPaceMonthTotals: { month: string; total: number }[]    = [];
 let csvDailySpend:     { date: string; posted: string; spend: number }[] = [];
 let csvCoverage:       { first: string; last: string }[]     = [];
 let loggedBigTotals:   { month: string; total: number }[]    = [];
+let ccSubMonthTotals:  { month: string; total: number }[]    = [];
 let ccPaidMarkers: Set<string> = new Set();
 let ccCycleBudget: number | null = null;
 let investmentsShown = 0;
@@ -97,7 +98,7 @@ try {
           : month;
   ccCycleNext = nextMonth(ccCycle);
 
-  const [sumRes, billRes, bigPurchasesRes, cashRes, ccCycleSumRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes, csvDailyRes, csvCoverageRes, loggedBigRes] = await client.batch([
+  const [sumRes, billRes, bigPurchasesRes, cashRes, ccCycleSumRes, prevSumRes, varRes, nextSumRes, nextBillRes, recurringModeRes, plaidSyncErrRes, budgetBaselineRes, paceBaselineRes, paidMarkersRes, csvDailyRes, csvCoverageRes, loggedBigRes, ccSubTotalsRes] = await client.batch([
     { sql: 'SELECT * FROM monthly_summary WHERE month = ? LIMIT 1', args: [month] },
     { sql: BILLS_QUERY, args: [month, month, month] },
     // cc_charges only contains big purchases (variable spend lives in cc_variable_spend)
@@ -154,6 +155,19 @@ try {
             GROUP BY month`,
       args: [],
     },
+    // Paid CC sub totals per pay month, newest first. The open cycle's pay month is
+    // excluded: its subs are still being checked off, so its total is only partial.
+    {
+      sql: `SELECT bp.month, SUM(bp.amount) AS total
+            FROM bill_payments bp
+            JOIN budget_config bc ON bc.id = bp.bill_id
+            WHERE bc.is_cc_default = 1 AND bp.month < ?
+              AND bp.is_paid = 1 AND COALESCE(bp.is_skipped, 0) = 0
+            GROUP BY bp.month
+            HAVING SUM(bp.amount) > 0
+            ORDER BY bp.month DESC`,
+      args: [nextMonth(openCycle)],
+    },
   ]);
 
   if (recurringModeRes.rows.length) {
@@ -195,6 +209,7 @@ try {
   variableSpendRows = varRes.rows          as unknown as typeof variableSpendRows;
   bills             = resolveBillStatus(billRes.rows as any[], isNow, todayDay);
   nextBills         = resolveBillStatus(nextBillRes.rows as any[], isNow, todayDay, /* allowAuto */ false);
+  ccSubMonthTotals  = ccSubTotalsRes.rows  as unknown as typeof ccSubMonthTotals;
   ccBudgetSummaries = budgetBaselineRes.rows as unknown as typeof ccBudgetSummaries;
   ccPaceMonthTotals = paceBaselineRes.rows   as unknown as typeof ccPaceMonthTotals;
   ccPaidMarkers     = new Set(paidMarkersRes.rows.map(r => String(r.key)));
@@ -227,6 +242,7 @@ const ccPayment = computeCCPayment({
   billingEndDay:    defaultBillingEndDay,
   paymentMonth:     month,
   ccVariableBudget: Number(summary.cc_budget),
+  recurringEstimate: computeRecurringEstimate(ccSubMonthTotals, month),
 });
 
 const ccTracker = computeCCSpendingTracker({
@@ -238,6 +254,7 @@ const ccTracker = computeCCSpendingTracker({
   nextMonthCCBudget,
   currentCCBudget:   ccCycleBudget ?? Number(summary.cc_budget),
   savedDisplayMode:  savedRecurringMode,
+  recurringEstimate: computeRecurringEstimate(ccSubMonthTotals, ccCycleNext),
 });
 
 const cashFlow = computeCashFlow({
@@ -859,7 +876,7 @@ const projection    = projectionModel && projectCCSpend(projectionModel, project
       >Reconcile</button>
       <button id="recurring-mode-toggle"
         class="flex items-center gap-1.5 rounded-full border border-surface-border px-2.5 py-1 text-xs hover:bg-surface-hover transition-colors"
-        title="Toggle between estimated and actual recurring amounts"
+        title="Toggle between estimated (average of the last 2 months' recurring totals) and actual recurring amounts"
       >
         <span id="mode-label-est" class={ccDisplayMode === 'estimated' ? 'font-semibold text-stone-700' : 'text-stone-400'}>{fmt(estimatedCCRecurring)}</span>
         <span class="text-stone-300">/</span>
@@ -1351,18 +1368,17 @@ document.getElementById('cc-bills')?.addEventListener('click', async e => {
     await api('/api/budget/bill-skip', 'POST', { month: billMonth, bill_id: billId, skip: true });
     row.remove();
 
-    // Recompute estimated/actual totals from remaining rows
+    // Recompute the actual total from remaining rows. The estimate comes from past
+    // months, so skipping a sub in this cycle doesn't change it.
     const sec = document.getElementById('cc-recurring-section') as HTMLElement;
-    let newEst = 0; let newAct = 0;
+    const newEst = parseFloat(sec.dataset.estimated ?? '0');
+    let newAct = 0;
     document.querySelectorAll<HTMLElement>('#cc-bills [data-bill-id]').forEach(r => {
       const amtEl = r.querySelector<HTMLElement>('.editable-bill-amount');
       const amt   = parseFloat(amtEl?.textContent?.replace(/[$,]/g,'') ?? '0');
       const chk   = r.querySelector<HTMLInputElement>('.bill-toggle');
-      // estimated uses monthly_target — we only have actual_amount in the DOM, use it as proxy
-      newEst += amt;
       if (chk?.checked) newAct += amt;
     });
-    sec.dataset.estimated = String(newEst);
     sec.dataset.actual    = String(newAct);
 
     const mode    = sec.dataset.mode as 'estimated' | 'actual';
@@ -1370,9 +1386,7 @@ document.getElementById('cc-bills')?.addEventListener('click', async e => {
     sec.dataset.paymentRecurring = String(recurVal);
 
     // Update toggle labels
-    const estLabel = document.getElementById('mode-label-est');
     const actLabel = document.getElementById('mode-label-act');
-    if (estLabel) estLabel.textContent = usd(newEst);
     if (actLabel) actLabel.textContent = usd(newAct);
 
     // Cascade to cash flow
