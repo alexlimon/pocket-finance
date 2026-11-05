@@ -36,3 +36,6 @@ scripts/fix-history-and-2027.ts
 scripts/init-from-sheet.ts
 scripts/migrate-budget.ts
 scripts/migrate-full-year.ts
+scripts/migrate-statement-balance.ts
+scripts/migrate-v3.ts
+scripts/migrate-v6.ts
