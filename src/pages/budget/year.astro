@@ -99,6 +99,15 @@ function getOrEmpty(month: string): MonthlySummary {
 }
 
 const today = new Date();
+// Highlighted (and scrolled-to) column; -1 when viewing another year.
+const currentIdx = Number(year) === today.getFullYear() ? today.getMonth() : -1;
+
+// Grid cells drop cents so 14 columns stay readable on a phone; the rest of the page keeps fmt().
+const usd0 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
+function cell(n: number): string {
+  return usd0.format(Math.round(n) || 0);
+}
+
 function ccSpend(month: string): number {
   const [y, mo] = month.split('-').map(Number);
   const billingCutoff = new Date(y, mo - 1, billingEndDay);
@@ -126,7 +135,7 @@ function netForMonth(month: string): number {
 ---
 
 <Layout title={`${year} Budget — Year View`} wide={true}>
-  <div class="mb-6 flex items-center justify-between">
+  <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
     <div class="flex items-center gap-3">
       <a href={`/budget/year?year=${Number(year)-1}`} class="rounded-lg border border-surface-border px-3 py-1.5 text-sm text-stone-500 hover:text-stone-800">←</a>
       <h1 class="text-xl font-semibold text-stone-800">{year} Overview</h1>
@@ -138,14 +147,14 @@ function netForMonth(month: string): number {
     </div>
   </div>
 
-  <div class="overflow-x-auto rounded-xl border border-surface-border">
-    <table class="w-full text-xs">
+  <div class="overflow-auto max-h-[calc(100dvh-11rem)] rounded-xl border border-surface-border" data-year-scroll>
+    <table class="year-grid w-full text-xs">
       <thead>
         <tr class="border-b border-surface-border bg-surface-card">
           <th class="px-3 py-3 text-left font-medium text-stone-400 w-36">Category</th>
           {MONTH_NAMES.map((m, i) => (
-            <th class="px-2 py-3 text-right font-medium text-stone-400">
-              <a href={`/budget?month=${months[i]}`} class="hover:text-brand-green">{m}</a>
+            <th class={`px-2 py-3 text-right font-medium ${i === currentIdx ? 'text-brand-green' : 'text-stone-400'}`} data-current={i === currentIdx ? '' : undefined}>
+              <a href={`/budget?month=${months[i]}`} class="inline-block py-1 hover:text-brand-green">{m}</a>
             </th>
           ))}
           <th class="px-3 py-3 text-right font-medium text-stone-400">Total</th>
@@ -163,9 +172,9 @@ function netForMonth(month: string): number {
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">{label}</td>
               {values.map((v) => (
-                <td class="px-2 py-2 text-right tabular-nums text-brand-green">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-brand-green">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums font-medium text-brand-green">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-brand-green">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })}
@@ -180,18 +189,18 @@ function netForMonth(month: string): number {
           return (
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">
-                <span class="relative group inline-flex items-center gap-1">
+                <span class="relative group inline-flex items-center gap-1 outline-none" tabindex="0">
                   Fixed Bills
                   <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
-                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block group-focus:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
                     Cash expenses that are fixed recurring bills — mortgage, utilities, and other bills always paid in cash.
                   </span>
                 </span>
               </td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -203,18 +212,18 @@ function netForMonth(month: string): number {
           return (
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">
-                <span class="relative group inline-flex items-center gap-1">
+                <span class="relative group inline-flex items-center gap-1 outline-none" tabindex="0">
                   CC Spend
                   <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
-                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block group-focus:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
                     Total credit card usage — includes food, shopping, and everything else that is not a fixed bill.
                   </span>
                 </span>
               </td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -226,18 +235,18 @@ function netForMonth(month: string): number {
           return (
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">
-                <span class="relative group inline-flex items-center gap-1">
+                <span class="relative group inline-flex items-center gap-1 outline-none" tabindex="0">
                   Unaccounted Cash Expenses
                   <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
-                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block group-focus:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
                     One-off cash outflows entered manually — separate from fixed recurring bills (rent, utilities, etc.)
                   </span>
                 </span>
               </td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -249,18 +258,18 @@ function netForMonth(month: string): number {
           return (
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-400">
-                <span class="relative group inline-flex items-center gap-1">
+                <span class="relative group inline-flex items-center gap-1 outline-none" tabindex="0">
                   CC Budget
                   <span class="text-stone-300 text-xs cursor-help">ⓘ</span>
-                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
+                  <span class="pointer-events-none absolute bottom-full left-0 mb-1.5 hidden group-hover:block group-focus:block w-64 rounded bg-stone-800 px-2 py-1.5 text-xs text-white z-10">
                     The planned spending limit set for each month's credit card cycle. Used as the CC Spend estimate for months whose billing date hasn't passed yet.
                   </span>
                 </span>
               </td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-400">{fmt(v)}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-400">{cell(v)}</td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums text-stone-400">{fmt(total)}</td>
+              <td class="px-3 py-2 text-right tabular-nums text-stone-400">{cell(total)}</td>
             </tr>
           );
         })()}
@@ -275,7 +284,7 @@ function netForMonth(month: string): number {
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">Checking (After)</td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
               <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
             </tr>
@@ -289,7 +298,7 @@ function netForMonth(month: string): number {
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-2 text-stone-500">Savings (After)</td>
               {values.map(v => (
-                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-2 text-right tabular-nums text-stone-600">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
               <td class="px-3 py-2 text-right tabular-nums text-stone-400">—</td>
             </tr>
@@ -310,10 +319,10 @@ function netForMonth(month: string): number {
               <td class="px-3 py-2 text-stone-500">Saved</td>
               {values.map(v => (
                 <td class="px-2 py-2 text-right tabular-nums text-stone-600">
-                  {v ? fmt(v) : <span class="text-stone-300">—</span>}
+                  {v ? cell(v) : <span class="text-stone-300">—</span>}
                 </td>
               ))}
-              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-2 text-right tabular-nums font-medium text-stone-600">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -329,9 +338,9 @@ function netForMonth(month: string): number {
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-1.5 text-xs text-stone-400">Total Income</td>
               {values.map(v => (
-                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -344,9 +353,9 @@ function netForMonth(month: string): number {
             <tr class="hover:bg-surface-hover">
               <td class="px-3 py-1.5 text-xs text-stone-400">Total Expenses</td>
               {values.map(v => (
-                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? fmt(v) : <span class="text-stone-300">—</span>}</td>
+                <td class="px-2 py-1.5 text-right tabular-nums text-xs text-stone-500">{v ? cell(v) : <span class="text-stone-300">—</span>}</td>
               ))}
-              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? fmt(total) : '—'}</td>
+              <td class="px-3 py-1.5 text-right tabular-nums text-xs font-medium text-stone-500">{total ? cell(total) : '—'}</td>
             </tr>
           );
         })()}
@@ -360,10 +369,10 @@ function netForMonth(month: string): number {
               <td class="px-3 py-2 text-stone-600">Net (pre-savings)</td>
               {values.map(v => (
                 <td class={`px-2 py-2 text-right tabular-nums ${v > 0 ? 'text-brand-green' : v < 0 ? 'text-brand-red' : 'text-stone-400'}`}>
-                  {v !== 0 ? fmt(v) : <span class="text-stone-300">—</span>}
+                  {v !== 0 ? cell(v) : <span class="text-stone-300">—</span>}
                 </td>
               ))}
-              <td class={`px-3 py-2 text-right tabular-nums ${total > 0 ? 'text-brand-green' : total < 0 ? 'text-brand-red' : 'text-stone-400'}`}>{fmt(total)}</td>
+              <td class={`px-3 py-2 text-right tabular-nums ${total > 0 ? 'text-brand-green' : total < 0 ? 'text-brand-red' : 'text-stone-400'}`}>{cell(total)}</td>
             </tr>
           );
         })()}
@@ -371,7 +380,7 @@ function netForMonth(month: string): number {
     </table>
   </div>
 
-  <p class="mt-3 text-xs text-stone-400">Click any month header to open the detail view. Net (pre-savings) = income − fixed bills − CC spend. Saved = savings after − savings before.</p>
+  <p class="mt-3 text-xs text-stone-400">Tap any month header to open the detail view. Amounts are rounded to the dollar. Net (pre-savings) = income − fixed bills − CC spend. Saved = savings after − savings before.</p>
 
   {amort.grandTotal > 0 && (
     <div class="mt-8 rounded-xl border border-surface-border bg-surface-card p-5">
@@ -420,3 +429,44 @@ function netForMonth(month: string): number {
     </div>
   )}
 </Layout>
+
+<style>
+  /* Row names and month headers stay put while the grid scrolls (14 columns don't fit a phone). */
+  .year-grid :is(th, td) { white-space: nowrap; }
+  .year-grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #f5f5ef;
+    box-shadow: inset 0 -1px 0 #c0cab2;
+  }
+  .year-grid tr > :first-child:not([colspan]) {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #f5f5ef;
+    box-shadow: inset -1px 0 0 #c0cab2, 6px 0 8px -6px rgb(0 0 0 / 0.12);
+    white-space: normal;
+    min-width: 7.5rem;
+    max-width: 9rem;
+    line-height: 1.25;
+  }
+  .year-grid thead th:first-child { z-index: 3; box-shadow: inset -1px -1px 0 #c0cab2; }
+  .year-grid tbody tr:hover > td:first-child { background: #e4e7db; }
+</style>
+
+{/* Current month column tint — nth-child can't take a CSS variable, so the index is rendered in. */}
+{currentIdx >= 0 && (
+  <style is:inline set:html={`.year-grid tbody tr > td:nth-child(${currentIdx + 2}):not([colspan]) { background: rgb(101 163 13 / 0.07); }`} />
+)}
+
+<script>
+  // Open scrolled so the current month (with two months of context) sits right of the row names.
+  const wrap = document.querySelector<HTMLElement>('[data-year-scroll]');
+  const cur  = wrap?.querySelector<HTMLElement>('th[data-current]');
+  if (wrap && cur && wrap.scrollWidth > wrap.clientWidth) {
+    const first  = wrap.querySelector<HTMLElement>('th')!;
+    const anchor = (cur.previousElementSibling?.previousElementSibling as HTMLElement | null) ?? cur;
+    wrap.scrollLeft = Math.max(0, anchor.offsetLeft - first.offsetWidth);
+  }
+</script>
