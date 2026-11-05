@@ -10,8 +10,8 @@ npm run build           # Production build (outputs to dist/)
 npm run preview         # Preview production build via Wrangler
 npm run check           # TypeScript type-check via astro check
 npm run seed            # Run scripts/seed.ts to populate DB
-npm run init            # Import from Google Sheet via scripts/init-from-sheet.ts
-npm run migrate         # Run scripts/migrate-budget.ts
+npm run init            # Import from Google Sheet via scripts/init-from-sheet.ts (local only, gitignored)
+npm run migrate         # Run scripts/migrate-budget.ts (local only, gitignored)
 npm run migrate:billing # Run scripts/migrate-billing.ts
 npm run backup          # Dump the Turso DB to backups/*.sql (see Database backup & restore)
 ```
