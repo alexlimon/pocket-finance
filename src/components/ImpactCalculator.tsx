@@ -83,8 +83,7 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
   // Salary = one paycheck × 26/12, so the 3-paycheck months are averaged in.
   const [checkAlex,  setCheckAlex]  = useState(Math.round(salary.alex.perCheck));
   const [checkMaham, setCheckMaham] = useState(Math.round(salary.maham.perCheck));
-  const [emergRent,  setEmergRent]  = useState(rent.amount > 0);
-  const [rentAmount, setRentAmount] = useState(Math.round(rent.amount));
+  const [emergRent,  setEmergRent]  = useState(false);  // true = rent stops coming in
 
   // Derive CC/cash averages from baselines
   const avgCCPayment = useMemo(() => {
@@ -347,7 +346,6 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
             checkAlex={checkAlex}   setCheckAlex={setCheckAlex}
             checkMaham={checkMaham} setCheckMaham={setCheckMaham}
             emergRent={emergRent}   setEmergRent={setEmergRent}
-            rentAmount={rentAmount} setRentAmount={setRentAmount}
             avgCCPayment={avgCCPayment}
             avgCashOut={avgCashOut}
             emergAlex={emergAlex}   setEmergAlex={setEmergAlex}
@@ -511,7 +509,6 @@ interface EmergencyPanelProps {
   checkAlex:  number;  setCheckAlex:  (v: number) => void;
   checkMaham: number;  setCheckMaham: (v: number) => void;
   emergRent:  boolean; setEmergRent:  (v: boolean) => void;
-  rentAmount: number;  setRentAmount: (v: number) => void;
   avgCCPayment:    number;
   avgCashOut:      number;
   emergAlex:  boolean; setEmergAlex:  (v: boolean) => void;
@@ -529,7 +526,6 @@ function EmergencyPanel({
   checkAlex, setCheckAlex,
   checkMaham, setCheckMaham,
   emergRent, setEmergRent,
-  rentAmount, setRentAmount,
   avgCCPayment, avgCashOut,
   emergAlex, setEmergAlex,
   emergMaham, setEmergMaham,
@@ -551,18 +547,16 @@ function EmergencyPanel({
 
   const avgIncomeAlex   = checkAlex  * PAYCHECKS_PER_MONTH;
   const avgIncomeMaham  = checkMaham * PAYCHECKS_PER_MONTH;
-  const rentIncome      = emergRent ? rentAmount : 0;
+  const rentIncome      = emergRent ? 0 : rent.amount;
   const keptSalary      = (emergAlex ? 0 : avgIncomeAlex) + (emergMaham ? 0 : avgIncomeMaham);
   const remainingIncome = keptSalary + rentIncome;
 
   const latestAlex  = Math.round(salary.alex.perCheck);
   const latestMaham = Math.round(salary.maham.perCheck);
-  const latestRent  = Math.round(rent.amount);
-  const isLatest    = checkAlex === latestAlex && checkMaham === latestMaham && rentAmount === latestRent;
+  const isLatest    = checkAlex === latestAlex && checkMaham === latestMaham;
   function pullLatest() {
     setCheckAlex(latestAlex);
     setCheckMaham(latestMaham);
-    setRentAmount(latestRent);
   }
   const asOf = (m: string | null) => {
     if (!m) return 'no data';
@@ -579,10 +573,11 @@ function EmergencyPanel({
   const survivalMonths = monthlyDeficit > 0 ? reserves / monthlyDeficit : Infinity;
   const survivalYears  = survivalMonths / 12;
 
-  const scenarioLabel =
-    emergAlex && emergMaham ? 'Both lose jobs' :
-    emergAlex  ? 'Alex loses job' :
-    emergMaham ? 'Maham loses job' : 'No job loss selected';
+  const anyEvent = emergAlex || emergMaham || emergRent;
+  const scenarioLabel = [
+    emergAlex && emergMaham ? 'Both lose jobs' : emergAlex ? 'Alex loses job' : emergMaham ? 'Maham loses job' : null,
+    emergRent ? 'Rent stops' : null,
+  ].filter(Boolean).join(' + ') || 'No life event selected';
 
   const survivalColor =
     survivalMonths < 3  ? 'text-brand-red' :
@@ -603,13 +598,14 @@ function EmergencyPanel({
 
   return (
     <div className="space-y-4">
-      {/* Who loses job */}
+      {/* Life event: job loss and/or rent stopping */}
       <div>
-        <p className="text-xs text-stone-400 mb-2">Who loses their job?</p>
-        <div className="flex gap-2">
+        <p className="text-xs text-stone-400 mb-2">What is the life event?</p>
+        <div className="flex flex-wrap gap-2">
           {[
             { label: 'Alex',  val: emergAlex,  set: setEmergAlex,  income: avgIncomeAlex  },
             { label: 'Maham', val: emergMaham, set: setEmergMaham, income: avgIncomeMaham },
+            ...(rent.amount > 0 ? [{ label: 'Rent', val: emergRent, set: setEmergRent, income: rent.amount }] : []),
           ].map(({ label, val, set, income }) => (
             <button key={label} type="button" onClick={() => set(!val)}
               className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition ${
@@ -624,12 +620,12 @@ function EmergencyPanel({
             </button>
           ))}
         </div>
-        {!emergAlex && !emergMaham && (
-          <p className="mt-2 text-xs text-stone-400">Select at least one person to model a job loss.</p>
+        {!anyEvent && (
+          <p className="mt-2 text-xs text-stone-400">Select at least one life event to model.</p>
         )}
       </div>
 
-      {/* Income: paychecks averaged over 26 per year, plus rent */}
+      {/* Income: paychecks averaged over 26 per year */}
       <div>
         <div className="mb-2 flex items-center justify-between gap-2">
           <p className="text-xs text-stone-400">Monthly income — biweekly paycheck × 26 ÷ 12 ({PAYCHECKS_PER_MONTH.toFixed(2)} checks/mo)</p>
@@ -660,26 +656,6 @@ function EmergencyPanel({
               </span>
             </div>
           ))}
-
-          {/* Rent keeps coming in regardless of job loss */}
-          <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 transition ${emergRent ? 'border-surface-border bg-surface-card' : 'border-surface-border/40 opacity-50'}`}>
-            <button type="button" onClick={() => setEmergRent(!emergRent)}
-              className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 text-[9px] transition ${emergRent ? 'border-brand-green bg-brand-green text-white' : 'border-stone-300'}`}>
-              {emergRent ? '✓' : ''}
-            </button>
-            <span className="text-sm text-stone-600">Rent coming in</span>
-            <input
-              type="number" step="50" min={0}
-              value={rentAmount}
-              disabled={!emergRent}
-              onChange={e => setRentAmount(Number(e.target.value))}
-              className="w-28 rounded-md border border-surface-border bg-surface px-2 py-1 text-sm tabular-nums disabled:opacity-40"
-            />
-            <span className="text-xs text-stone-400">/mo</span>
-            <span className="ml-auto text-[11px] text-stone-400">
-              {rent.month ? `latest ${asOf(rent.month)}: ${fmtCurrency(rent.amount)}` : 'no rent income recorded'}
-            </span>
-          </div>
         </div>
       </div>
 
@@ -745,7 +721,7 @@ function EmergencyPanel({
       </div>
 
       {/* Results */}
-      {(emergAlex || emergMaham) && (
+      {anyEvent && (
         <div className="rounded-xl border-2 border-stone-200 bg-stone-50 p-4 space-y-3">
           <p className="text-xs font-medium uppercase tracking-wide text-stone-500">{scenarioLabel}</p>
 
@@ -754,7 +730,7 @@ function EmergencyPanel({
               <p className="text-xs text-stone-400">Remaining income</p>
               <p className="mt-1 text-lg font-semibold tabular-nums text-stone-700">{fmtCurrency(remainingIncome, { compact: true })}/mo</p>
               <p className="mt-0.5 text-[10px] text-stone-400">
-                {fmtCurrency(keptSalary, { compact: true })} salary{emergRent && rentIncome > 0 ? ` + ${fmtCurrency(rentIncome, { compact: true })} rent` : ''}
+                {fmtCurrency(keptSalary, { compact: true })} salary{rentIncome > 0 ? ` + ${fmtCurrency(rentIncome, { compact: true })} rent` : ''}
               </p>
             </div>
             <div>
