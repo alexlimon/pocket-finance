@@ -5,7 +5,7 @@ import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
 import {
   aggregateMonth, baselineRatio, burnLine, buildSankey,
-  fmtCurrency, fmtPct,
+  fmtCurrency, fmtPct, latestPaycheck, latestRent,
   type BillAggRow, type VariableSpendRow, type MonthAggregate, type MonthBaseline,
 } from '../lib/insights';
 import { currentMonth, prevMonth, nextMonth as nextMo, totalIncome, LATEST_INVESTMENTS_SQL, type MonthlySummary, type CashExpense, type CCCharge } from '../lib/budget';
@@ -199,6 +199,14 @@ const recurringBills = billConfigs
     if (pay?.is_skipped) return [];
     return [{ id: bc.id, name: bc.name, amount: pay ? pay.amount : Number(bc.monthly_target ?? 0) }];
   });
+
+// ── Latest paychecks + rent for the emergency panel ──────────────────────────
+// summaries cover the trailing 12 months, which latestPaycheck needs to tell 2-check from 3-check months.
+const salary = {
+  alex:  latestPaycheck(summaries.map(s => ({ month: s.month, amount: Number(s.income_alex)  })), thisMonth),
+  maham: latestPaycheck(summaries.map(s => ({ month: s.month, amount: Number(s.income_maham) })), thisMonth),
+};
+const rent = latestRent(cashRows, thisMonth);
 
 // ── Safe to Spend (current month) — uses budget-page formula ─────────────────
 const curBL = monthBaselines[0];  // first entry = thisMonth
@@ -491,6 +499,8 @@ const baseLabel =
       monthBaselines={monthBaselines}
       reserves={reserves}
       recurringBills={recurringBills}
+      salary={salary}
+      rent={rent}
     />
   </div>
 </Layout>

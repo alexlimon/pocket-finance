@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { projectScenario, fmtCurrency, type Scenario, type ScenarioResult, type MonthBaseline } from '../lib/insights';
+import { projectScenario, fmtCurrency, PAYCHECKS_PER_MONTH, type Scenario, type ScenarioResult, type MonthBaseline, type LatestPaycheck } from '../lib/insights';
 
 const CC_BASE = 5000;
 
@@ -13,6 +13,8 @@ interface Props {
   monthBaselines: MonthBaseline[];
   reserves:       number;
   recurringBills: BillLineItem[];
+  salary:         { alex: LatestPaycheck; maham: LatestPaycheck };
+  rent:           { amount: number; month: string | null };
 }
 
 type TabKind = 'recurring' | 'onetime' | 'income_change' | 'cc_budget' | 'emergency';
@@ -46,7 +48,7 @@ const TAB_LABELS: Record<TabKind, string> = {
   emergency:     '🚨 Emergency',
 };
 
-export default function ImpactCalculator({ monthBaselines, reserves, recurringBills }: Props) {
+export default function ImpactCalculator({ monthBaselines, reserves, recurringBills, salary, rent }: Props) {
   const months = monthBaselines.map(m => m.month);
   const [tab, setTab] = useState<TabKind>('recurring');
 
@@ -78,15 +80,13 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
   const [emergCC,    setEmergCC]    = useState(true);
   const [emergCash,  setEmergCash]  = useState(true);
 
-  // Derive per-person income and CC/cash averages from baselines
-  const avgIncomeAlex  = useMemo(() => {
-    const vals = monthBaselines.filter(m => m.incomeAlex != null);
-    return vals.length ? vals.reduce((s, m) => s + (m.incomeAlex ?? 0), 0) / vals.length : 0;
-  }, [monthBaselines]);
-  const avgIncomeMaham = useMemo(() => {
-    const vals = monthBaselines.filter(m => m.incomeMaham != null);
-    return vals.length ? vals.reduce((s, m) => s + (m.incomeMaham ?? 0), 0) / vals.length : 0;
-  }, [monthBaselines]);
+  // Salary = one paycheck × 26/12, so the 3-paycheck months are averaged in.
+  const [checkAlex,  setCheckAlex]  = useState(Math.round(salary.alex.perCheck));
+  const [checkMaham, setCheckMaham] = useState(Math.round(salary.maham.perCheck));
+  const [emergRent,  setEmergRent]  = useState(rent.amount > 0);
+  const [rentAmount, setRentAmount] = useState(Math.round(rent.amount));
+
+  // Derive CC/cash averages from baselines
   const avgCCPayment = useMemo(() => {
     const vals = monthBaselines.filter(m => m.ccPayment != null);
     return vals.length ? vals.reduce((s, m) => s + (m.ccPayment ?? 0), 0) / vals.length : 0;
@@ -342,8 +342,12 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
           <EmergencyPanel
             reserves={reserves}
             recurringBills={recurringBills}
-            avgIncomeAlex={avgIncomeAlex}
-            avgIncomeMaham={avgIncomeMaham}
+            salary={salary}
+            rent={rent}
+            checkAlex={checkAlex}   setCheckAlex={setCheckAlex}
+            checkMaham={checkMaham} setCheckMaham={setCheckMaham}
+            emergRent={emergRent}   setEmergRent={setEmergRent}
+            rentAmount={rentAmount} setRentAmount={setRentAmount}
             avgCCPayment={avgCCPayment}
             avgCashOut={avgCashOut}
             emergAlex={emergAlex}   setEmergAlex={setEmergAlex}
@@ -502,8 +506,12 @@ function Verdict({ result, reserves }: { result: ScenarioResult; reserves: numbe
 interface EmergencyPanelProps {
   reserves:        number;
   recurringBills:  BillLineItem[];
-  avgIncomeAlex:   number;
-  avgIncomeMaham:  number;
+  salary:          { alex: LatestPaycheck; maham: LatestPaycheck };
+  rent:            { amount: number; month: string | null };
+  checkAlex:  number;  setCheckAlex:  (v: number) => void;
+  checkMaham: number;  setCheckMaham: (v: number) => void;
+  emergRent:  boolean; setEmergRent:  (v: boolean) => void;
+  rentAmount: number;  setRentAmount: (v: number) => void;
   avgCCPayment:    number;
   avgCashOut:      number;
   emergAlex:  boolean; setEmergAlex:  (v: boolean) => void;
@@ -517,7 +525,11 @@ interface EmergencyPanelProps {
 function EmergencyPanel({
   reserves,
   recurringBills,
-  avgIncomeAlex, avgIncomeMaham,
+  salary, rent,
+  checkAlex, setCheckAlex,
+  checkMaham, setCheckMaham,
+  emergRent, setEmergRent,
+  rentAmount, setRentAmount,
   avgCCPayment, avgCashOut,
   emergAlex, setEmergAlex,
   emergMaham, setEmergMaham,
@@ -537,8 +549,26 @@ function EmergencyPanel({
   const toggleBill = (id: string) => setBillEnabled(prev => ({ ...prev, [id]: !prev[id] }));
   const setBillAmt = (id: string, v: number) => setBillAmounts(prev => ({ ...prev, [id]: v }));
 
-  const lostIncome      = (emergAlex ? avgIncomeAlex : 0) + (emergMaham ? avgIncomeMaham : 0);
-  const remainingIncome = avgIncomeAlex + avgIncomeMaham - lostIncome;
+  const avgIncomeAlex   = checkAlex  * PAYCHECKS_PER_MONTH;
+  const avgIncomeMaham  = checkMaham * PAYCHECKS_PER_MONTH;
+  const rentIncome      = emergRent ? rentAmount : 0;
+  const keptSalary      = (emergAlex ? 0 : avgIncomeAlex) + (emergMaham ? 0 : avgIncomeMaham);
+  const remainingIncome = keptSalary + rentIncome;
+
+  const latestAlex  = Math.round(salary.alex.perCheck);
+  const latestMaham = Math.round(salary.maham.perCheck);
+  const latestRent  = Math.round(rent.amount);
+  const isLatest    = checkAlex === latestAlex && checkMaham === latestMaham && rentAmount === latestRent;
+  function pullLatest() {
+    setCheckAlex(latestAlex);
+    setCheckMaham(latestMaham);
+    setRentAmount(latestRent);
+  }
+  const asOf = (m: string | null) => {
+    if (!m) return 'no data';
+    const [y, mo] = m.split('-').map(Number);
+    return new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'short', year: 'numeric' });
+  };
 
   const effectiveBills = recurringBills.reduce((s, b) => s + (billEnabled[b.id] ? (billAmounts[b.id] ?? b.amount) : 0), 0);
   const effectiveCC    = emergCC   ? (leanCC   ?? avgCCPayment) : 0;
@@ -597,6 +627,60 @@ function EmergencyPanel({
         {!emergAlex && !emergMaham && (
           <p className="mt-2 text-xs text-stone-400">Select at least one person to model a job loss.</p>
         )}
+      </div>
+
+      {/* Income: paychecks averaged over 26 per year, plus rent */}
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="text-xs text-stone-400">Monthly income — biweekly paycheck × 26 ÷ 12 ({PAYCHECKS_PER_MONTH.toFixed(2)} checks/mo)</p>
+          <button type="button" onClick={pullLatest} disabled={isLatest}
+            className="shrink-0 rounded-md border border-surface-border px-2 py-1 text-xs text-stone-500 transition hover:border-stone-400 disabled:opacity-40">
+            ↻ Pull latest
+          </button>
+        </div>
+        <div className="space-y-1">
+          {([
+            { label: 'Alex',  check: checkAlex,  setCheck: setCheckAlex,  latest: salary.alex,  lost: emergAlex  },
+            { label: 'Maham', check: checkMaham, setCheck: setCheckMaham, latest: salary.maham, lost: emergMaham },
+          ] as const).map(({ label, check, setCheck, latest, lost }) => (
+            <div key={label} className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 transition ${lost ? 'border-surface-border/40 opacity-50' : 'border-surface-border bg-surface-card'}`}>
+              <span className="w-14 text-sm text-stone-600">{label}</span>
+              <input
+                type="number" step="10" min={0}
+                value={check}
+                onChange={e => setCheck(Number(e.target.value))}
+                className="w-28 rounded-md border border-surface-border bg-surface px-2 py-1 text-sm tabular-nums"
+              />
+              <span className="text-xs text-stone-400">/check →</span>
+              <span className={`text-sm font-medium tabular-nums ${lost ? 'line-through text-stone-400' : 'text-stone-700'}`}>
+                {fmtCurrency(check * PAYCHECKS_PER_MONTH)}/mo
+              </span>
+              <span className="ml-auto text-[11px] text-stone-400">
+                latest {asOf(latest.month)}: {fmtCurrency(latest.perCheck * latest.checks)} = {latest.checks} checks
+              </span>
+            </div>
+          ))}
+
+          {/* Rent keeps coming in regardless of job loss */}
+          <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border px-3 py-2 transition ${emergRent ? 'border-surface-border bg-surface-card' : 'border-surface-border/40 opacity-50'}`}>
+            <button type="button" onClick={() => setEmergRent(!emergRent)}
+              className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 text-[9px] transition ${emergRent ? 'border-brand-green bg-brand-green text-white' : 'border-stone-300'}`}>
+              {emergRent ? '✓' : ''}
+            </button>
+            <span className="text-sm text-stone-600">Rent coming in</span>
+            <input
+              type="number" step="50" min={0}
+              value={rentAmount}
+              disabled={!emergRent}
+              onChange={e => setRentAmount(Number(e.target.value))}
+              className="w-28 rounded-md border border-surface-border bg-surface px-2 py-1 text-sm tabular-nums disabled:opacity-40"
+            />
+            <span className="text-xs text-stone-400">/mo</span>
+            <span className="ml-auto text-[11px] text-stone-400">
+              {rent.month ? `latest ${asOf(rent.month)}: ${fmtCurrency(rent.amount)}` : 'no rent income recorded'}
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Lean expense buckets */}
@@ -669,7 +753,9 @@ function EmergencyPanel({
             <div>
               <p className="text-xs text-stone-400">Remaining income</p>
               <p className="mt-1 text-lg font-semibold tabular-nums text-stone-700">{fmtCurrency(remainingIncome, { compact: true })}/mo</p>
-              <p className="mt-0.5 text-[10px] text-stone-400">from income_alex / income_maham in monthly summary</p>
+              <p className="mt-0.5 text-[10px] text-stone-400">
+                {fmtCurrency(keptSalary, { compact: true })} salary{emergRent && rentIncome > 0 ? ` + ${fmtCurrency(rentIncome, { compact: true })} rent` : ''}
+              </p>
             </div>
             <div>
               <p className="text-xs text-stone-400">Lean expenses</p>

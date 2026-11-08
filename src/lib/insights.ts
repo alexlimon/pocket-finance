@@ -225,6 +225,54 @@ export function buildSankey(params: {
   return { nodes, links, surplus };
 }
 
+// ── Latest salary / rent (pure) ──────────────────────────────────────────────
+
+/** Biweekly pay lands 26 times a year, so the average month gets 26 / 12 ≈ 2.17 paychecks. */
+export const PAYCHECKS_PER_MONTH = 26 / 12;
+
+export interface LatestPaycheck {
+  perCheck: number;          // one paycheck
+  checks:   number;          // paychecks inferred in `month` (2 or 3)
+  month:    string | null;   // month the figure was taken from
+}
+
+/**
+ * Infers the latest single paycheck from monthly salary totals.
+ *
+ * monthly_summary stores each person's salary as a month total, which is 2 paychecks
+ * in most months and 3 in two months a year. The median of the trailing year is a
+ * 2-check month (10 of 12 are), so a latest total well above it is read as 3 checks.
+ */
+export function latestPaycheck(rows: { month: string; amount: number }[], uptoMonth: string): LatestPaycheck {
+  const hist = rows
+    .filter(r => r.month <= uptoMonth && r.amount > 0)
+    .sort((a, b) => a.month.localeCompare(b.month));
+  if (!hist.length) return { perCheck: 0, checks: 2, month: null };
+
+  const latest = hist[hist.length - 1];
+  const window = hist.slice(-12).map(r => r.amount).sort((a, b) => a - b);
+  const median = window[Math.floor(window.length / 2)];
+  const checks = latest.amount > median * 1.25 ? 3 : 2;
+  return { perCheck: latest.amount / checks, checks, month: latest.month };
+}
+
+/** Cash income rows that are rent from the rental property. */
+export const RENT_INCOME_RE = /\brent\b/i;
+
+/** Most recent month's rent income at or before `uptoMonth`. */
+export function latestRent(
+  rows: { month: string; description: string; amount: number; type: string }[],
+  uptoMonth: string,
+): { amount: number; month: string | null } {
+  const byMonth = new Map<string, number>();
+  for (const r of rows) {
+    if (r.type !== 'income' || r.month > uptoMonth || !RENT_INCOME_RE.test(r.description)) continue;
+    byMonth.set(r.month, (byMonth.get(r.month) ?? 0) + Number(r.amount));
+  }
+  const month = [...byMonth.keys()].filter(m => (byMonth.get(m) ?? 0) > 0).sort().pop() ?? null;
+  return { amount: month ? byMonth.get(month)! : 0, month };
+}
+
 // ── Scenario Projector (pure, client-safe) ───────────────────────────────────
 
 export type Scenario =
