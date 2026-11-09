@@ -3,6 +3,7 @@ import Layout from '../layouts/Layout.astro';
 import ImpactCalculator from '../components/ImpactCalculator';
 import { verifySession } from '../lib/auth';
 import { getClient } from '../lib/db';
+import { readMonthBalances } from '../lib/recompute';
 import {
   aggregateMonth, baselineRatio, burnLine, buildSankey,
   fmtCurrency, fmtPct, latestPaycheck, latestRent,
@@ -38,6 +39,7 @@ let varSpend: VariableSpendRow[]  = [];
 let bigCharges: CCCharge[]        = [];
 let cashRows: CashExpense[]       = [];
 let investments = 0;
+let endBalances: Awaited<ReturnType<typeof readMonthBalances>> = new Map();
 
 try {
   const [sumRes, billPayRes, configRes, varRes, ccRes, cashRes, investmentsRes] = await Promise.all([
@@ -67,6 +69,8 @@ try {
   bigCharges      = ccRes.rows      as unknown as CCCharge[];
   cashRows        = cashRes.rows    as unknown as CashExpense[];
   if (investmentsRes.rows.length) investments = Number((investmentsRes.rows[0] as any).investments_value);
+  // End-of-month balances exactly as the budget page derives them (projected sweep included).
+  endBalances = await readMonthBalances(client, [thisMonth]);
 } finally {
   client.close();
 }
@@ -220,8 +224,10 @@ const totalLiquid = checking + savings;
 
 // Typed balance if there is one, otherwise the start, matching the other balance cards.
 const moneyMarket = currentSummary ? Number(currentSummary.mm_after ?? currentSummary.mm_before ?? 0) : 0;
-// Investments are volatile, so they don't count as reserves.
-const reserves = savings + moneyMarket;
+// Reserves = all cash at the end of this month: checking + savings + money market,
+// after this month's planned moves and sweep. Investments are volatile, so they don't count.
+const endBal   = endBalances.get(thisMonth);
+const reserves = endBal ? endBal.checkingEnd + endBal.savingsEnd + endBal.mmEnd : totalLiquid + moneyMarket;
 
 // ── Sparkline geometry ───────────────────────────────────────────────────────
 const W = 560, H = 90, PAD_X = 12, PAD_Y = 10;
