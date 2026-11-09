@@ -26,8 +26,6 @@ const startMonth = months[0];
 
 // ── Fetch ────────────────────────────────────────────────────────────────────
 const client = getClient(env);
-const [curYear] = thisMonth.split('-').map(Number);
-const yearEnd = `${curYear}-12`;
 
 type BillConfig = { id: string; name: string; monthly_target: number | null; is_cc_default: number; start_month: string | null; end_month: string | null };
 type BillPayRow = { month: string; bill_id: string; amount: number; is_paid: number; is_skipped: number; is_cc_default: number; monthly_target: number | null };
@@ -148,13 +146,13 @@ const baseline = baselineRatio(currentAgg);
 const burn     = burnLine(aggregates);
 const sankey   = buildSankey({ agg: currentAgg, savingsGoal });
 
-// ── Future months: real per-month baselines for scenario projector ────────────
+// ── Future months: rolling 12 months (this month + 11) for the scenario projector ──
 // Uses the same formula as budget.astro: income = salary + cash income,
 // expenses = checking bills + CC payment (cc_budget + CC subs) + cash expenses.
 const futureMonths: string[] = [];
 {
   let m = thisMonth;
-  while (m <= yearEnd) {
+  for (let i = 0; i < 12; i++) {
     futureMonths.push(m);
     m = nextMo(m);
   }
@@ -497,7 +495,7 @@ const baseLabel =
   <div class="rounded-xl border border-surface-border bg-surface-card p-5">
     <h2 class="mb-1 text-xs uppercase tracking-wide text-stone-500">What If?</h2>
     <p class="mb-4 text-xs text-stone-400">
-      Simulate a new bill, one-time purchase, or income change — see month-by-month impact through year-end.
+      Simulate a new bill, one-time purchase, or income change — see month-by-month impact over the next 12 months.
       Reserves: <span class="tabular-nums font-medium text-stone-700">{fmtCurrency(reserves)}</span>.
     </p>
     <ImpactCalculator

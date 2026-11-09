@@ -371,10 +371,10 @@ export function projectScenario(params: {
   const eoyScenarioNet = projections.reduce((s, p) => s + p.scenarioNet, 0);
   const totalDelta     = eoyScenarioNet - eoyBaseNet;
 
-  // Affordability is judged on the year's total net, not month-by-month.
-  // If the year still ends positive after the new expense, you just save less —
-  // no reserves needed. Only when the full-year net goes negative do you need
-  // to draw from savings.
+  // Affordability is judged on the total net across the projected window (rolling
+  // 12 months on the dashboard), not month-by-month. If the window still ends positive
+  // after the new expense, you just save less — no reserves needed. Only when the
+  // window's net goes negative do you need to draw from savings.
   const needsReserves = eoyScenarioNet < 0;
   const reservesDraw  = needsReserves ? Math.abs(eoyScenarioNet) : 0;
 

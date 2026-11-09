@@ -428,7 +428,7 @@ export default function ImpactCalculator({ monthBaselines, reserves, recurringBi
             </tbody>
             <tfoot>
               <tr className="border-t-2 border-surface-border font-medium">
-                <td className="px-2 py-2 text-stone-700">Year-end</td>
+                <td className="px-2 py-2 text-stone-700">12-mo total</td>
                 <td className="px-2 py-2 text-right tabular-nums text-stone-600">
                   {fmtCurrency(result.projections.reduce((s, p) => s + p.scenarioIncome, 0), { compact: true })}
                 </td>
@@ -458,7 +458,7 @@ function Verdict({ result, reserves }: { result: ScenarioResult; reserves: numbe
     return (
       <div className="rounded-lg border border-brand-green/30 bg-brand-green/5 px-4 py-3">
         <p className="text-sm font-medium text-brand-green">
-          +{fmtCurrency(result.totalDelta)} more to save by year-end
+          +{fmtCurrency(result.totalDelta)} more to save over the next 12 months
         </p>
         <p className="mt-0.5 text-xs text-stone-500">
           Pre-savings surplus grows from {fmtCurrency(result.eoyBaseNet, { compact: true })} to {fmtCurrency(result.eoyScenarioNet, { compact: true })}.
@@ -474,10 +474,10 @@ function Verdict({ result, reserves }: { result: ScenarioResult; reserves: numbe
     return (
       <div className={`rounded-lg border px-4 py-3 ${covered ? 'border-brand-yellow/30 bg-brand-yellow/5' : 'border-brand-red/30 bg-brand-red/5'}`}>
         <p className={`text-sm font-medium ${covered ? 'text-brand-yellow' : 'text-brand-red'}`}>
-          Year goes negative — you'd pull {fmtCurrency(result.reservesDraw)} from savings
+          Next 12 months go negative — you'd pull {fmtCurrency(result.reservesDraw)} from savings
         </p>
         <p className="mt-0.5 text-xs text-stone-500">
-          Your total income for the year doesn't cover this.{' '}
+          Your income over the next 12 months doesn't cover this.{' '}
           {covered
             ? `Reserves: ${fmtCurrency(reserves, { compact: true })} → ${fmtCurrency(reserves - result.reservesDraw, { compact: true })} after draw.`
             : `Reserves: ${fmtCurrency(reserves, { compact: true })} — short by ${fmtCurrency(result.reservesDraw - reserves, { compact: true })}.`}
@@ -489,10 +489,10 @@ function Verdict({ result, reserves }: { result: ScenarioResult; reserves: numbe
   return (
     <div className="rounded-lg border border-brand-green/30 bg-brand-green/5 px-4 py-3">
       <p className="text-sm font-medium text-brand-green">
-        Affordable — {fmtCurrency(savingsHit)} less to save by year-end
+        Affordable — {fmtCurrency(savingsHit)} less to save over the next 12 months
       </p>
       <p className="mt-0.5 text-xs text-stone-500">
-        Your year-end net stays positive at {fmtCurrency(result.eoyScenarioNet, { compact: true })} — this comes out of what you'd save, not your reserves.
+        Your 12-month net stays positive at {fmtCurrency(result.eoyScenarioNet, { compact: true })} — this comes out of what you'd save, not your reserves.
         {result.verdict === 'tight' && ' The hit is large relative to your average monthly net — watch closely.'}
       </p>
     </div>
